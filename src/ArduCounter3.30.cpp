@@ -1292,16 +1292,6 @@ void showEEPROM() {
 
 void restoreFromEEPROM() {
     int address = 0;  
-
-    char c1, c2, c3;
-    c1 = EEPROM.read(address);
-    c2 = EEPROM.read(address+1);
-    c3 = EEPROM.read(address+2); 
-    if (c1 != 'C' || c2 != 'f' || c3 != 'g') {
-        Serial.println(F("M no config in EEPROM"));
-        return;
-    }
-
     if (EEPROM.read(address) != 'C' || EEPROM.read(address+1) != 'f' || EEPROM.read(address+2) != 'g') {
         Serial.println(F("M no config in EEPROM"));
         return;
