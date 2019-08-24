@@ -24,15 +24,19 @@
  * A0-A5 (D14-D19) = PCINT 8-13 =  PCIR1 = PC = PCIE1 = pcmsk1
  */
 
-/* test cmds analog ESP:
+/* test cmds analog ESP 8266:
  *  20v               Verbose
  *  17,3,0,50a        A0, rising, no Pullup, MinLen 50
  *  15,25t            Level Diff Thresholds
  *  
- * for ESP with D5 falling pullup 30
+ * for ESP8266 with D5 falling pullup 30
  *  5,2,1,30a
  *  20v
  *  10,20,1,1i
+ * 
+ * for ESP32 pin 23
+ * 23,2,1,50a
+ * 10,20i
  */
 
 /*
@@ -95,6 +99,7 @@
         12.8.19 - V3.33 fix handling of keepalive timeouts when millis wraps
                   V3.34 add RSSI output when devVerbose >= 5 in kealive responses
         16.8.19 - V3.35 fix a bug when analog support was disabled and a warning with an unused variable
+        19.8.19 - V4.00 start porting to ESP32
 
     ToDo / Ideas:
         make analogInterval available in Fhem
@@ -106,6 +111,7 @@
 #include <Arduino.h>
 
 /* Remove this before compiling */
+/* todo: put this in ENV in PlatformIO as another target  */
 #define TestConfig // include my SSID / secret
 
 
@@ -118,35 +124,21 @@
 /* support analog input for ferraris counters with IR light hardware */
 #define analogIR 1
 
-/* use a sample config at boot */
-// #define debugCfg 1
-
 #include "pins_arduino.h"
 #include <EEPROM.h>
 
-const char versionStr[] PROGMEM = "ArduCounter V3.35";
+const char versionStr[] PROGMEM = "ArduCounter V4.00";
 
 #define SERIAL_SPEED 38400
 #define MAX_INPUT_NUM 8
 
-#ifdef analogIR
-int sensorValueOff = 0;             // value read from the photo transistor when ir LED is off
-int sensorValueOn  = 0;             // value read from the photo transistor when ir LED is on
-int analogThresholdMin = 100;       // min value of analog input 
-int analogThresholdMax = 110;       // max value of analog input
-uint32_t lastAnalogRead;            // millis() at last analog read
-uint16_t analogReadInterval = 20;   // interval at which to read analog values
-uint8_t  analogReadState = 0;       // to keep track of switching LED on/off
-
-uint8_t triggerState;               // todo: use existing arrays instead
-
-// save measurement during same level as sum and count to get average and then put in history when doCount is called
-// but how do we do this before we can detect the levels?
-
+#if defined(ESP8266) || defined(ESP32)  // Wifi stuff
+#define WifiSupport 1
+#if defined(ESP8266)
+#include <ESP8266WiFi.h>          
+#elif defined(ESP32)
+#include <WiFi.h>          
 #endif
-
-#ifdef ESP8266                      // ESP variables and definitions
-#include <ESP8266WiFi.h>            // =============================
 
 #ifdef TestConfig
 #include "ArduCounterTestConfig.h"
@@ -158,6 +150,7 @@ const char* password = "secret";
 WiFiServer Server(80);              // For ESP WiFi connection
 WiFiClient Client1;                 // active TCP connection
 WiFiClient Client2;                 // secound TCP connection to send reject message
+
 boolean Client1Connected;           // remember state of TCP connection
 boolean Client2Connected;           // remember state of TCP connection
 
@@ -165,9 +158,18 @@ boolean tcpMode = false;
 uint8_t delayedTcpReports = 0;      // how often did we already delay reporting because tcp disconnected
 uint32_t lastDelayedTcpReports = 0; // last time we delayed
 
+uint16_t keepAliveTimeout = 200;
+uint32_t lastKeepAlive;
+
+#endif
+
+
+#if defined(ESP8266)                // ESP 8266 variables and definitions
+                                    // ==================================
+
 #define MAX_HIST 20                 // 20 history entries for ESP boards (can be increased)
 
-#ifdef analogIR                     // code for ESP with analog pin and reflection light barrier support (test)
+#if defined (analogIR)              // code for ESP with analog pin and reflection light barrier support (test)
 
 #define MAX_APIN 18
 #define MAX_PIN 9
@@ -195,7 +197,6 @@ short internalPins[MAX_PIN] =
     A0 };                           // D0=16, D1=5, D2=4, D5=14, A0=17
                                     
                                     
-     
 uint8_t analogPins[MAX_PIN] = 
   { 0,0,0,0,0,0,0,0,1 };            // ESP pin A0 (pinIndex 8, internal 17) is analog 
 
@@ -203,8 +204,7 @@ const int analogInPin = A0;         // Analog input pin that the photo transisto
 const int irOutPin = D6;            // Digital output pin that the IR-LED is attached to
 const int ledOutPin = D7;           // Signal LED output pin
 
-#else                               // code for ESP without analog pin and reflection light barrier support
-
+#else                               // code for ESP8266 without analog pin and reflection light barrier support
 
 #define MAX_APIN 8
 #define MAX_PIN 8
@@ -228,12 +228,60 @@ short internalPins[MAX_PIN] =
     D5, D5, D6, D7};                // printed pin numbers 4, 5, 6, 7   (4 should not be used and could be removed here)
                                     // D0=16, D1=5, D2=4, D5=14, A0=17, ...
      
-#endif                              // end of ESP section without analog reading
+#endif                              // end of ESP8266 section without analog reading
+
+#elif defined(ESP32)                // ESP32 variables and definitions
+                                    // ==================================
+#ifndef analogIR
+#define analogIR 1                  // make sure analog is defined for now
+#endif
+
+#define MAX_HIST 20                 // 20 history entries for ESP boards (can be increased)
+#define MAX_APIN 40
+#define MAX_PIN 40
+
+/* ESP32 pins that are typically ok to use 
+ * (some might be set to -1 (disallowed) because they are used 
+ * as reset, serial, led or other things on most boards) 
+ * maps printed pin numbers (aPin) to sketch internal index numbers */
+short allowedPins[MAX_APIN] =       // ESP32 Pins
+  {-1, -1, -1, -1,                  // printed pin numbers 0-3 are not ok
+    4, -1, -1, -1,                  // printed pin number 4 is ok to be used
+   -1, -1, -1, -1,                  // 8-11 not avaliable
+   -1, -1, -1, -1,                  // 12-15 for JTAG
+   16, 17, 18, 19,                  // 16-19 avaliable
+   -1, 21, 22, 23,                  // 21-23 avaliable   
+   -1, 25, 26, 27,                  // 25-27 avaliable   
+   -1, -1, -1, -1,                  // 28-31 not avaliable
+   32, 33, 34, 35,                  // 32-35 avaliable (34/35 input only)
+   36, -1, -1, 39};                 // 36 and 39 avaliable but also input only
+
+/* Map from sketch internal pin index to real chip IO pin number (not aPin, e.g. for ESP)
+   Note that the internal numbers might be different from the printed 
+   pin numbers (e.g. pin 0 is in index 0 but real chip pin number 16! */
+short internalPins[MAX_PIN] = 
+  { 0, 1, 2, 3,                     // map from internal pin Index to 
+    4, 5, 6, 7,                     // real GPIO pin numbers / defines
+    8, 9, 10, 11,                   // real GPIO pin numbers / defines
+    12, 13, 14, 15,                 // real GPIO pin numbers / defines
+    16, 17, 18, 19,                 // real GPIO pin numbers / defines
+    20, 21, 22, 23,                 // real GPIO pin numbers / defines
+    24, 25, 26, 27,                 // real GPIO pin numbers / defines
+    28, 29, 30, 31,                 // real GPIO pin numbers / defines
+    32, 33, 34, 35,                 // real GPIO pin numbers / defines
+    36, 37, 38, 39 };               // real GPIO pin numbers / defines
         
         
+uint8_t analogPins[MAX_PIN] = 
+  { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0 };            // ESP pin A0 (pinIndex _, internal _) is analog 
+        
+const int analogInPin = A0;         // Analog input pin that the photo transistor is attached to (internally number _)
+const int irOutPin  = 4;            // Digital output pin that the IR-LED is attached to
+const int ledOutPin = 2;            //on board LED output pin
         
         
-#else                               // Arduino Uno or Nano variables and definitions
+#elif defined(__AVR_ATmega328P__)
+                                    // Arduino Uno or Nano variables and definitions
                                     // =============================================
 
 #define MAX_HIST 20                 // 20 history entries for arduino boards
@@ -243,7 +291,7 @@ short internalPins[MAX_PIN] =
  * as reset, serial, led or other things on most boards) 
  * maps printed pin numbers to sketch internal index numbers */
 
-#ifdef analogIR
+#if defined(analogIR)
 
 /* 2 is used for IR out, 12 for signal, A7 for In */
 #define MAX_APIN 22
@@ -321,8 +369,7 @@ volatile uint8_t *port_to_pcmask[] = {
 /* last PIN States at io port to detect individual pin changes in arduino ISR */
 volatile static uint8_t PCintLast[3];
 
-#endif
-
+#endif                              // end of Nano / Uno specific stuff
 
 Print *Output;                      // Pointer to output device (Serial / TCP connection with ESP8266)
 uint32_t bootTime;                  
@@ -341,10 +388,6 @@ uint32_t intervalSml =  2000;       // default 2 secs - continue count if timeDi
 uint16_t countMin    =     2;       // continue counting if count is less than this and intervalMax not over
 
 uint32_t lastReportCall;
-#ifdef ESP8266
-uint16_t keepAliveTimeout = 200;
-uint32_t lastKeepAlive;
-#endif
 
 /* index to the following arrays is the internal pin index number  */
 
@@ -387,6 +430,20 @@ uint16_t commandData[MAX_INPUT_NUM];            // input data over serial port o
 uint8_t  commandDataPointer = 0;                // index pointer to next input value
 uint16_t value;                                 // the current value for input function
 
+#ifdef analogIR
+int sensorValueOff = 0;             // value read from the photo transistor when ir LED is off
+int sensorValueOn  = 0;             // value read from the photo transistor when ir LED is on
+int analogThresholdMin = 100;       // min value of analog input 
+int analogThresholdMax = 110;       // max value of analog input
+uint32_t lastAnalogRead;            // millis() at last analog read
+uint16_t analogReadInterval = 20;   // interval at which to read analog values
+uint8_t  analogReadState = 0;       // to keep track of switching LED on/off
+
+uint8_t triggerState;               // todo: use existing arrays instead
+
+// idea: save analog measurement during same level as sum and count to get average and then put in history when doCount is called
+// but how do we do this before we can detect the levels?
+#endif
 
 
 void initPinVars(short pinIndex, uint32_t now) {
@@ -417,7 +474,6 @@ void initPinVars(short pinIndex, uint32_t now) {
 #endif
     /* todo: add upper and lower thresholds for analog */
 }
-
 
 
 void PrintErrorMsg() {
@@ -523,7 +579,7 @@ static void inline doCount(uint8_t pinIndex, uint8_t level, uint32_t now) {
  *  on Arduino and ESP8266 platforms
  */
 
-#ifndef ESP8266 
+#if defined(__AVR_ATmega328P__)
 /* Add a pin to be handled (Arduino code) */
 uint8_t AddPinChangeInterrupt(uint8_t rPin) {
     volatile uint8_t *pcmask;                   // pointer to PCMSK0 or 1 or 2 depending on the port corresponding to the pin
@@ -597,11 +653,11 @@ ISR(PCINT2_vect) {
     PCint(2);
 }
 
-#else
+#elif defined(ESP8266)
 /* Add a pin to be handled (ESP8266 code) */
 
 /* attachInterrupt needs to be given an individual function for each interrrupt .
- *  since we cant pass the pin value into the ISR or we need to use an 
+ *  since we cant pass the pin value into the ISR or we could use an 
  *  internal function __attachInnterruptArg ... but then we need a fixed reference for the pin numbers ...
 */
 
@@ -655,6 +711,76 @@ uint8_t AddPinChangeInterrupt(uint8_t rPin) {
     }
     return 1;
 }
+
+#elif defined(ESP32)
+
+void IRAM_ATTR ESPISR16() {   // ISR for real pin GPIO 16 / pinIndex 16
+    doCount(16, digitalRead(16), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR17() {   // ISR for real pin GPIO 17 / pinIndex 17
+    doCount(17, digitalRead(17), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR18() {   // ISR for real pin GPIO 18 / pinIndex 18
+    doCount(18, digitalRead(18), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR19() {   // ISR for real pin GPIO 19 / pinIndex 19
+    doCount(19, digitalRead(19), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR21() {   // ISR for real pin GPIO 21 / pinIndex 21
+    doCount(21, digitalRead(21), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR22() {   // ISR for real pin GPIO 22 / pinIndex 22
+    doCount(22, digitalRead(22), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR23() {   // ISR for real pin GPIO 23 / pinIndex 23
+    doCount(23, digitalRead(23), millis());
+    // called with pinIndex, level, now
+}
+
+// todo: add the other available GPIOs above 23
+// or try with __attachInnterruptArg
+
+uint8_t AddPinChangeInterrupt(uint8_t rPin) {
+    switch(rPin) {
+    case 16:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR16, CHANGE);
+        break;
+    case 17:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR17, CHANGE);
+        break;
+    case 18:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR18, CHANGE);
+        break;
+    case 19:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR19, CHANGE);
+        break;
+    case 21:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR21, CHANGE);
+        break;
+    case 22:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR22, CHANGE);
+        break;
+    case 23:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR23, CHANGE);
+        break;
+    default:
+        PrintErrorMsg(); Output->println(F("attachInterrupt"));
+    }
+    return 1;
+}
+
 #endif
 
 
@@ -699,7 +825,7 @@ void showPinHistory(short pinIndex, uint32_t now) {
     uint8_t hi;
     uint8_t start = (histIndex + 2) % MAX_HIST;
     uint8_t count = 0;
-    uint32_t last;
+    uint32_t last = 0;
     boolean first = true;
 
     for (uint8_t i = 0; i < MAX_HIST; i++) {
@@ -794,7 +920,7 @@ void showPinCounter(short pinIndex, boolean showOnly, uint32_t now) {
         lastCount[pinIndex]    = count;             // remember current count for next interval
         lastRejCount[pinIndex] = rejCount;
         lastReport[pinIndex]   = now;               // remember when we reported
-#ifdef ESP8266
+#ifdef WifiSupport
         delayedTcpReports      = 0;
 #endif
         reportSequence[pinIndex]++;
@@ -825,7 +951,7 @@ void showPinCounter(short pinIndex, boolean showOnly, uint32_t now) {
         Output->print(widthSum / countDiff);
     }
     Output->println();    
-#ifdef ESP8266
+#ifdef WifiSupport
     if (tcpMode && !showOnly) {
         Serial.print(F("D reported pin "));
         Serial.print(activePin[pinIndex]);
@@ -859,7 +985,7 @@ boolean reportDue() {
 
 void report() {
     uint32_t now = millis();    
-#ifdef ESP8266
+#ifdef WifiSupport
     if (tcpMode && !Client1Connected && (delayedTcpReports < 3)) {
         if(delayedTcpReports == 0 || ((now - lastDelayedTcpReports) > 30000)) {
             Serial.print(F("D report called but tcp is disconnected - delaying ("));
@@ -979,7 +1105,7 @@ void addCmd(uint16_t *values, uint8_t size) {
     uint8_t rPin = internalPins[pinIndex];
 
     if (activePin[pinIndex] != aPin) {          // in case this pin is not already active counting
-      #ifndef ESP8266
+      #if defined(__AVR_ATmega328P__)
         uint8_t port = digitalPinToPort(rPin) - 2;
         PCintLast[port] = *portInputRegister(port+2);
       #endif    
@@ -1049,9 +1175,9 @@ void removeCmd(uint16_t *values, uint8_t size) {
 #ifdef analogIR
     if (!analogPins[pinIndex]) {
 #endif      
-#ifdef ESP8266
+#if defined(ESP8266) || defined(ESP32)
         detachInterrupt(digitalPinToInterrupt(internalPins[pinIndex]));
-#else   
+#elif defined(__AVR_ATmega328P__)
         if (!RemovePinChangeInterrupt(internalPins[pinIndex])) {      
             PrintErrorMsg(); 
             Output->println(F("RemInt"));
@@ -1110,7 +1236,7 @@ void saveToEEPROMCmd() {
         if (activePin[pinIndex] >= 0)
             updateEEPROMSlot(address, 'A', (uint16_t)activePin[pinIndex], (uint16_t)(pulseLevel[pinIndex] ? 3:2), 
                                                     (uint16_t)pullup[pinIndex], (uint16_t)pulseWidthMin[pinIndex]);
-#ifdef ESP8266                   
+#if defined(ESP8266) || defined(ESP32)
     EEPROM.commit();               
 #endif  
     Serial.print(F("config saved, "));
@@ -1166,6 +1292,16 @@ void showEEPROM() {
 
 void restoreFromEEPROM() {
     int address = 0;  
+
+    char c1, c2, c3;
+    c1 = EEPROM.read(address);
+    c2 = EEPROM.read(address+1);
+    c3 = EEPROM.read(address+2); 
+    if (c1 != 'C' || c2 != 'f' || c3 != 'g') {
+        Serial.println(F("M no config in EEPROM"));
+        return;
+    }
+
     if (EEPROM.read(address) != 'C' || EEPROM.read(address+1) != 'f' || EEPROM.read(address+2) != 'g') {
         Serial.println(F("M no config in EEPROM"));
         return;
@@ -1200,6 +1336,16 @@ void restoreFromEEPROM() {
 }
 
 
+void printConnection(Print *Out) {
+    Out->print(F("M Connected to "));
+    Out->print(WiFi.SSID());    
+    Out->print(F(" with IP "));
+    Out->print(WiFi.localIP());    
+    Out->print(F(" RSSI "));
+    Out->print(WiFi.RSSI());
+    Out->println();
+}
+
 /* give status report in between if requested over serial input */
 void showCmd() {
     uint32_t now = millis();  
@@ -1207,6 +1353,10 @@ void showCmd() {
     printVersionMsg();
     Output->println();
     
+#if defined(WifiSupport)
+    printConnection(Output);
+#endif    
+
     showIntervals();    
 #ifdef analogIR 
     showThresholds();
@@ -1244,16 +1394,13 @@ void initialize() {
 #endif
     lastReportCall  = now;          // time for first output after intervalMin from now
     devVerbose = 0;
-#ifndef ESP8266
+#if defined(__AVR_ATmega328P__)
     for (uint8_t port=0; port <= 2; port++) {
         PCintLast[port] = *portInputRegister(port+2); // current pin states at port for PCInt handler
     }
 #endif
-#ifdef debugCfg
-    debugSetup();
-#endif
     restoreFromEEPROM();
-#ifdef ESP8266  
+#ifdef WifiSupport  
     lastKeepAlive = now;
 #endif      
 }
@@ -1343,7 +1490,7 @@ void keepAliveCmd(uint16_t *values, uint8_t size) {
 
     if (values[0] == 1 && size > 0) {
         Output->print(F("alive"));
-#ifdef ESP8266
+#ifdef WifiSupport
         uint32_t now = millis();
         if (devVerbose >=5) {
             Output->print(F(" RSSI "));
@@ -1365,7 +1512,7 @@ void keepAliveCmd(uint16_t *values, uint8_t size) {
 }
 
 
-#ifdef ESP8266
+#ifdef WifiSupport
 void quitCmd() {
     if (Client1.connected()) {
         Client1.println(F("closing connection"));
@@ -1431,7 +1578,7 @@ void handleInput(char c) {
             commandData[commandDataPointer] = value;
             keepAliveCmd(commandData, commandDataPointer+1);
             break;   
-#ifdef ESP8266      
+#ifdef WifiSupport      
         case 'q':                       // quit
             quitCmd();
             break; 
@@ -1469,36 +1616,6 @@ void handleInput(char c) {
     }
 }
 
-#ifdef debugCfg
-/* do sample config so we don't need to configure pins after each reboot */
-void debugSetup() {
-    commandData[0] = 10;
-    commandData[1] = 20;
-    commandData[2] = 3;
-    commandData[3] = 0;
-    commandDataPointer = 4;
-    intervalCmd(commandData, commandDataPointer);
-
-    commandData[0] = 1;   // pin 1
-    commandData[1] = 2;   // falling
-    commandData[2] = 1;   // pullup
-    commandData[3] = 30;  // min Length
-    commandDataPointer = 4;
-    addCmd(commandData, commandDataPointer);
-
-    commandData[0] = 2;   // pin 2
-    addCmd(commandData, commandDataPointer);
-
-/*  
-    commandData[0] = 5;   // pin 5
-    addCmd(commandData, commandDataPointer);
-
-    commandData[0] = 6;   // pin 6
-    addCmd(commandData, commandDataPointer);
-*/
-}
-#endif
-
 
 #ifdef debugPins
 void debugPinChanges() {
@@ -1533,10 +1650,11 @@ void debugPinChanges() {
 #endif
 
 
-#ifdef ESP8266    
+#ifdef WifiSupport    
 void connectWiFi() {
     Client1Connected = false;
     Client2Connected = false;
+    int counter = 0;
 
     // Connect to WiFi network
     WiFi.mode(WIFI_STA);
@@ -1564,22 +1682,21 @@ void connectWiFi() {
                 Serial.println(WiFi.status());
             }
             delay(1000);
+            counter++;
+
+            if (counter > 5) {
+                Serial.println(F("M Retry connecting WiFi"));
+                WiFi.begin(ssid, password);         // authenticate again
+                delay (1000);
+                counter = 0;
+            }
         }    
-        Serial.println();
-        Serial.print(F("M WiFi connected to "));
-        Serial.println(WiFi.SSID());
-    } else {
-        Serial.print(F("M WiFi already connected to "));
-        Serial.println(WiFi.SSID());
     }
+    printConnection (&Serial);
 
     // Start the server
     Server.begin();
     Serial.println(F("M Server started"));
-
-    // Print the IP address
-    Serial.print(F("M Use this IP: "));
-    Serial.println(WiFi.localIP());
 }
 
 
@@ -1736,7 +1853,7 @@ void readAnalog() {
 
 void setup() {
     Serial.begin(SERIAL_SPEED);             // initialize serial
-#ifdef ESP8266    
+#if defined(ESP8266) || defined (ESP32)
     EEPROM.begin(100);
 #endif    
     delay (500);
@@ -1752,7 +1869,7 @@ void setup() {
       pinMode(ledOutPin, OUTPUT);
 #endif  
     helloCmd();                             // started message to serial
-#ifdef ESP8266
+#ifdef WifiSupport
     connectWiFi();
 #endif
 }
@@ -1762,7 +1879,7 @@ void setup() {
 void loop() {
     handleTime();
     if (Serial.available()) handleInput(Serial.read());
-#ifdef ESP8266    
+#ifdef WifiSupport    
     handleConnections();
 #endif
 #ifdef analogIR
