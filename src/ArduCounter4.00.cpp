@@ -100,9 +100,7 @@
                   V3.34 add RSSI output when devVerbose >= 5 in kealive responses
         16.8.19 - V3.35 fix a bug when analog support was disabled and a warning with an unused variable
         19.8.19 - V4.00 start porting to ESP32
-        25.8.19 - started testing new ISR
-
-        
+                
 
     ToDo / Ideas:
         make analogInterval available in Fhem
