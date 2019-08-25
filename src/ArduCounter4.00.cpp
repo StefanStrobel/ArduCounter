@@ -100,7 +100,7 @@
                   V3.34 add RSSI output when devVerbose >= 5 in kealive responses
         16.8.19 - V3.35 fix a bug when analog support was disabled and a warning with an unused variable
         19.8.19 - V4.00 start porting to ESP32
-        25.8.19 - started testing new ISR sopsowqpsko
+        25.8.19 - started testing new ISR
 
         
 
@@ -109,6 +109,8 @@
         save analogInterval to Flash
         detect analog Threasholds automatically and adjust over time
         make wifi ssid / secret configurable
+        restructure ISRs // see https://github.com/arduino/Arduino/pull/4519
+
     
 */ 
 #include <Arduino.h>
@@ -710,7 +712,7 @@ uint8_t AddPinChangeInterrupt(uint8_t rPin) {
         attachInterrupt(digitalPinToInterrupt(rPin), ESPISR16, CHANGE);
         break;
     default:
-        PrintErrorMsg(); Output->println(F("attachInterrupt"));
+        PrintErrorMsg(); Output->println(F("illegal pin number in attachInterrupt"));
     }
     return 1;
 }
@@ -752,8 +754,51 @@ void IRAM_ATTR ESPISR23() {   // ISR for real pin GPIO 23 / pinIndex 23
     // called with pinIndex, level, now
 }
 
-// todo: add the other available GPIOs above 23
-// or try with __attachInnterruptArg
+void IRAM_ATTR ESPISR25() {   // ISR for real pin GPIO 25 / pinIndex 25
+    doCount(25, digitalRead(25), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR26() {   // ISR for real pin GPIO 26 / pinIndex 26
+    doCount(26, digitalRead(26), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR27() {   // ISR for real pin GPIO 27 / pinIndex 27
+    doCount(27, digitalRead(27), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR32() {   // ISR for real pin GPIO 32 / pinIndex 32
+    doCount(32, digitalRead(32), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR33() {   // ISR for real pin GPIO 33 / pinIndex 33
+    doCount(33, digitalRead(33), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR34() {   // ISR for real pin GPIO 34 / pinIndex 34
+    doCount(34, digitalRead(34), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR35() {   // ISR for real pin GPIO 35 / pinIndex 35
+    doCount(35, digitalRead(35), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR36() {   // ISR for real pin GPIO 36 / pinIndex 36
+    doCount(36, digitalRead(36), millis());
+    // called with pinIndex, level, now
+}
+
+void IRAM_ATTR ESPISR39() {   // ISR for real pin GPIO 39 / pinIndex 39
+    doCount(39, digitalRead(39), millis());
+    // called with pinIndex, level, now
+}
+
 
 uint8_t AddPinChangeInterrupt(uint8_t rPin) {
     switch(rPin) {
@@ -778,12 +823,38 @@ uint8_t AddPinChangeInterrupt(uint8_t rPin) {
     case 23:
         attachInterrupt(digitalPinToInterrupt(rPin), ESPISR23, CHANGE);
         break;
+    case 25:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR25, CHANGE);
+        break;
+    case 26:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR26, CHANGE);
+        break;
+    case 27:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR27, CHANGE);
+        break;
+    case 32:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR32, CHANGE);
+        break;
+    case 33:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR33, CHANGE);
+        break;
+    case 34:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR34, CHANGE);
+        break;
+    case 35:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR35, CHANGE);
+        break;
+    case 36:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR36, CHANGE);
+        break;
+    case 39:
+        attachInterrupt(digitalPinToInterrupt(rPin), ESPISR39, CHANGE);
+        break;
     default:
-        PrintErrorMsg(); Output->println(F("attachInterrupt"));
+        PrintErrorMsg(); Output->println(F("illegal pin number in attachInterrupt"));
     }
     return 1;
 }
-
 #endif
 
 
