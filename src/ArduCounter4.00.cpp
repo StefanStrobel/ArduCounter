@@ -36,7 +36,7 @@
  * 
  * for ESP32 pin 23
  * 23,2,1,50a
- * 10,20i
+ * 10,20,1,1i
  */
 
 /*
@@ -99,7 +99,7 @@
         12.8.19 - V3.33 fix handling of keepalive timeouts when millis wraps
                   V3.34 add RSSI output when devVerbose >= 5 in kealive responses
         16.8.19 - V3.35 fix a bug when analog support was disabled and a warning with an unused variable
-        19.8.19 - V4.00 start porting to ESP32
+        19.8.19 - V4.00 start porting to ESP32.
                 
 
     ToDo / Ideas:
@@ -112,6 +112,20 @@
     
 */ 
 #include <Arduino.h>
+
+#define TTGO_DISPLAY 1
+#ifdef TTGO_DISPLAY
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Button2.h>
+#include "esp_adc_cal.h"
+/*#include "bmp.h"*/
+
+TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h
+uint8_t lineCount;
+
+#endif
 
 /* Remove this before compiling */
 /* todo: put this in ENV in PlatformIO as another target  */
@@ -183,10 +197,10 @@ uint32_t lastKeepAlive;
  * maps printed pin numbers (aPin) to sketch internal index numbers */
 short allowedPins[MAX_APIN] =       // ESP 8266 with analog:
   { 0,  1,  2, -1,                  // printed pin numbers 0,1,2 are ok to be used
-   -1,  5, -1, -1,                  // printed pin number 5 is ok to be used
-   -1, -1, -1, -1,                  // 8-11 not avaliable
+   -1,  5, -1, -1,                  // printed pin number 5 is ok to be used (6 and 7 are used for analog counting)
+   -1, -1, -1, -1,                  // 8-11 not avaliable 
    -1, -1, -1, -1,                  // 12-15 not avaliable
-   -1,  8 };                        // 16 not available, 17 is analog
+   -1,  8 };                        // 16 not available, 17 is analog (at internal index 8)
      
 /* Wemos / NodeMCU Pins 3,4 and 8 (GPIO 0,2 and 15) define boot mode and therefore
  * can not be used to connect to signal */
@@ -247,9 +261,25 @@ short internalPins[MAX_PIN] =
  * (some might be set to -1 (disallowed) because they are used 
  * as reset, serial, led or other things on most boards) 
  * maps printed pin numbers (aPin) to sketch internal index numbers */
+#if defined(TTGO_DISPLAY)
+short allowedPins[MAX_APIN] =       // ESP32 Pins with TTGO Display
+  {-1, -1, -1, -1,                  // printed pin numbers 0-3 are not ok (2 is LED)
+   -1, -1, -1, -1,                  // printed pin number
+   -1, -1, -1, -1,                  // 8-11 not avaliable
+   -1, -1, -1, -1,                  // 12-15 for JTAG
+   -1, 17, -1, -1,                  // 16-19 avaliable
+   -1, 21, 22, -1,                  // 21-23 avaliable   
+   -1, 25, 26, 27,                  // 25-26 avaliable, use 27 as irOut
+   -1, -1, -1, -1,                  // 28-31 not avaliable
+   32, 33, 34, 35,                  // 32-35 avaliable (34/35 input only, 35 is right button)
+   -1, -1, -1, 39};                 // 36 is A0, is 39 avaliable but also input only
+
+const int irOutPin  = 27;           // Digital output pin that the IR-LED is attached to
+
+#else
 short allowedPins[MAX_APIN] =       // ESP32 Pins
-  {-1, -1, -1, -1,                  // printed pin numbers 0-3 are not ok
-    4, -1, -1, -1,                  // printed pin number 4 is ok to be used
+  {-1, -1, -1, -1,                  // printed pin numbers 0-3 are not ok (2 is LED)
+   -1, -1, -1, -1,                  // printed pin number 4 is irOut
    -1, -1, -1, -1,                  // 8-11 not avaliable
    -1, -1, -1, -1,                  // 12-15 for JTAG
    16, 17, 18, 19,                  // 16-19 avaliable
@@ -257,11 +287,11 @@ short allowedPins[MAX_APIN] =       // ESP32 Pins
    -1, 25, 26, 27,                  // 25-27 avaliable   
    -1, -1, -1, -1,                  // 28-31 not avaliable
    32, 33, 34, 35,                  // 32-35 avaliable (34/35 input only)
-   36, -1, -1, 39};                 // 36 and 39 avaliable but also input only
+   -1, -1, -1, 39};                 // 36 is A0, is 39 avaliable but also input only
+const int irOutPin  = 4;            // Digital output pin that the IR-LED is attached to
+#endif
 
-/* Map from sketch internal pin index to real chip IO pin number (not aPin, e.g. for ESP)
-   Note that the internal numbers might be different from the printed 
-   pin numbers (e.g. pin 0 is in index 0 but real chip pin number 16! */
+/* Map from sketch internal pin index to real chip IO pin number or GPIO numbers (same for ESP32) */
 short internalPins[MAX_PIN] = 
   { 0, 1, 2, 3,                     // map from internal pin Index to 
     4, 5, 6, 7,                     // real GPIO pin numbers / defines
@@ -276,11 +306,10 @@ short internalPins[MAX_PIN] =
         
         
 uint8_t analogPins[MAX_PIN] = 
-  { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0 };            // ESP pin A0 (pinIndex _, internal _) is analog 
+  { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0 };            // ESP pin A0 (pinIndex 36, internal 36) is analog 
         
 const int analogInPin = A0;         // Analog input pin that the photo transistor is attached to (internally number _)
-const int irOutPin  = 4;            // Digital output pin that the IR-LED is attached to
-const int ledOutPin = 2;            //on board LED output pin
+const int ledOutPin = 2;            // on board LED output pin
         
         
 #elif defined(__AVR_ATmega328P__)
@@ -1032,6 +1061,24 @@ void showPinCounter(short pinIndex, boolean showOnly, uint32_t now) {
         Serial.println(F(" over tcp "));  
     }
 #endif  
+#ifdef TTGO_DISPLAY
+    if (lineCount < 4) {
+        tft.setCursor(0,32+8*lineCount);
+        tft.print(F("R"));                          // R Report
+        tft.print(activePin[pinIndex]);
+        tft.print(F(" C"));                         // C - Count
+        tft.print(count);
+        tft.print(F(" D"));                         // D - Count Diff (without pulse that marks the begin)
+        tft.print(countDiff);
+        tft.print(F("/"));                          // R - real Diff for long counter - includes first after restart
+        tft.print(realDiff);
+        tft.print(F(" T"));                         // T - Time
+        tft.print(timeDiff);  
+        tft.print(F(" X"));                         // X Reject
+        tft.print(rejDiff);  
+        lineCount++;
+    }
+#endif
     
 }
 
@@ -1075,6 +1122,10 @@ void report() {
         } else return;
     }
 #endif    
+#ifdef TTGO_DISPLAY
+    tft.setCursor(0,48);
+    lineCount = 0;
+#endif
     for (uint8_t pinIndex=0; pinIndex < MAX_PIN; pinIndex++) {  // go through all observed pins as pinIndex
         if (activePin[pinIndex] >= 0) {
             showPinCounter (pinIndex, false, now);              // report pin counters if necessary
@@ -1406,6 +1457,17 @@ void printConnection(Print *Out) {
     Out->print(F(" RSSI "));
     Out->print(WiFi.RSSI());
     Out->println();
+#ifdef TTGO_DISPLAY    
+    tft.setCursor(0, 0);
+    tft.print(F("Conected to "));
+    tft.print(WiFi.SSID());
+    tft.print(F("        "));
+    tft.setCursor(0, 16);
+    tft.print("IP ");
+    tft.print(WiFi.localIP());
+    tft.print(F(" RSSI "));
+    tft.print(WiFi.RSSI());
+#endif
 }
 #endif
 
@@ -1723,6 +1785,11 @@ void connectWiFi() {
     WiFi.mode(WIFI_STA);
     delay (1000);    
     if (WiFi.status() != WL_CONNECTED) {
+#ifdef TTGO_DISPLAY 
+        tft.setCursor(0,0);
+        tft.print(F("Conecting WiFi to "));
+        tft.print(ssid);
+#endif
         Serial.print(F("M Connecting WiFi to "));
         Serial.println(ssid);
         WiFi.begin(ssid, password);                 // authenticate 
@@ -1748,6 +1815,11 @@ void connectWiFi() {
             counter++;
 
             if (counter > 5) {
+#ifdef TTGO_DISPLAY    
+                tft.setCursor(0,0);
+                tft.print(F("Retry conecting WiFi to"));
+                tft.print(ssid);
+#endif
                 Serial.println(F("M Retry connecting WiFi"));
                 WiFi.begin(ssid, password);         // authenticate again
                 delay (1000);
@@ -1890,18 +1962,23 @@ void readAnalog() {
                     analogReadState = 5;
                     break;
                 case 5:
+                    int sensorDiff;
                     sensorValueOn = analogRead(analogInPin);    // read the analog in value (on)
+                    sensorDiff = sensorValueOn - sensorValueOff;
                     analogReadState = 0;
                     lastAnalogRead = now;
-                    detectTrigger (sensorValueOn - sensorValueOff);            
+                    detectTrigger (sensorDiff);            
                     if (devVerbose >= 25) {
                         char line[20];
-                        sprintf(line, "L%4d, %4d -> % 4d", sensorValueOn, sensorValueOff, sensorValueOn - sensorValueOff);
+                        sprintf(line, "L%4d, %4d -> % 4d", sensorValueOn, sensorValueOff, sensorDiff);
                         Output->println(line);
                     } else if (devVerbose >= 20) {
                         Output->print(F("L"));
-                        Output->println(sensorValueOn - sensorValueOff);
+                        Output->println(sensorDiff);
                     }                    
+#ifdef TTGO_DISPLAY                    
+                    tft.drawRect(0,300,sensorDiff,10);  // todo: set color, clear to right ...
+#endif
                     break;
                 default:
                     analogReadState = 0;
@@ -1915,6 +1992,15 @@ void readAnalog() {
 
 
 void setup() {
+#ifdef TTGO_DISPLAY    
+    tft.init();
+    tft.fillScreen(TFT_BLACK);
+    tft.setRotation(1);
+    tft.setTextFont(2);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+#endif    
+
     Serial.begin(SERIAL_SPEED);             // initialize serial
 #if defined(ESP8266) || defined (ESP32)
     EEPROM.begin(100);
