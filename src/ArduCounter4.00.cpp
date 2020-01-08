@@ -109,22 +109,40 @@
         19.8.19 - V4.00 start porting to ESP32.
         21.12.19 - V4.10 Support for TTGO Lilygo Board (T-Display) with ST7789V 1,14 Zoll Display (240x135) see https://github.com/Xinyuan-LilyGO/TTGO-T-Display
                         or https://de.aliexpress.com/item/33048962331.html?spm=a2g0o.store_home.hotSpots_212315783.0
-        30.12.19 - V4.20 make analog support user defineable at runtime
+        30.12.19 - V4.20 started to make analog support user defineable at runtime
 
                 
 
     ToDo / Ideas:
-        load pin config and start counting even befre wifi is up ...
+        load pin config and start counting even before wifi is up ...
+        reconnect when wifi is lost (see e.g. https://medium.com/diy-my-smart-home/esp-tipp-wifi-reconnect-einbauen-dc4a7397b741), was a bug,
+            https://github.com/espressif/arduino-esp32/issues/2501
+            https://github.com/jantenhove/GoodWeLogger/pull/20
+            set autoReConnect: https://github.com/esp8266/Arduino/blob/master/doc/esp8266wifi/station-class.rst#setautoreconnect
+            
+            Doku: https://github.com/esp8266/Arduino/blob/master/doc/esp8266wifi/station-class.rst
 
-        reconnect when wifi is lost (see e.g. https://medium.com/diy-my-smart-home/esp-tipp-wifi-reconnect-einbauen-dc4a7397b741)
-        combine arrays (see below)
+            Source: https://github.com/espressif/arduino-esp32/blob/master/libraries/WiFi/src/WiFi.h
+
+        combine arrays (see below) - BitFields? https://en.cppreference.com/w/cpp/language/bit_field
+
         let analog pins be defined at runtime, save configuration for analog pins
-        integrate wifi manager (e.g. https://github.com/smurf0969/WiFiConnect)
+        integrate wifi manager (e.g. https://github.com/smurf0969/WiFiConnect) to make wifi ssid / secret configurable
+            https://github.com/tzapu/WiFiManager
+
         make analogInterval available in Fhem
         save analogInterval to Flash
         detect analog Threasholds automatically and adjust over time
-        make wifi ssid / secret configurable
-        restructure ISRs // see https://github.com/arduino/Arduino/pull/4519
+        
+        restructure ISRs // see https://github.com/arduino/Arduino/pull/4519, use attachInterrputArg on ESPs and AVR as soon as available
+            https://github.com/arduino/ArduinoCore-avr/issues/85
+            https://github.com/arduino/ArduinoCore-API/issues/95
+            https://github.com/arduino/ArduinoCore-avr/pull/58
+            https://www.bountysource.com/issues/30477489-support-extra-parameter-on-attachinterrupt
+
+
+        OTA Update if wireless: https://github.com/espressif/arduino-esp32/tree/master/libraries/ArduinoOTA (via webserver)
+        Better integrate TFT Display - https://github.com/Xinyuan-LilyGO/TTGO-T-Display
 
     
 */ 
@@ -597,9 +615,9 @@ uint16_t analogReadInterval = 50;   // interval at which to read analog values (
 uint8_t analogReadState = 0;        // to keep track of switching LED on/off, measuring etc.
 uint8_t analogReadAmp = 3;          // amplification for display
 
-// next vars would be individual to anaolg pin if more than 1 analog pin would be allowed
-uint8_t analogInPin;                // analog input pin that the photo transistor is attached to
-uint8_t irOutPin;                   // Digital output pin that the IR-LED or laser is attached to
+// next vars would be individual to analog pin if more than 1 analog pin would be allowed
+//uint8_t analogInPin;                // analog input pin that the photo transistor is attached to
+//uint8_t irOutPin;                   // Digital output pin that the IR-LED or laser is attached to
 
 uint16_t analogThresholdMin = 100;  // min value of analog input 
 uint16_t analogThresholdMax = 110;  // max value of analog input
@@ -1737,14 +1755,10 @@ void CmdHello() {
         }
     }
     Output->print(F(" available"));
-    Output->print(F(" T"));
-    Output->print(now);
-    Output->print(F(","));
-    Output->print(millisWraps);
-    Output->print(F(" B"));
-    Output->print(bootTime);
-    Output->print(F(","));
-    Output->print(bootWraps);
+    Output->print(F(" T")); Output->print(now);
+    Output->print(F(","));  Output->print(millisWraps);
+    Output->print(F(" B")); Output->print(bootTime);
+    Output->print(F(","));  Output->print(bootWraps);
     
     Output->println();
     showIntervals();
@@ -1952,66 +1966,77 @@ void debugPinChanges() {
 
 
 #ifdef WifiSupport    
+
+void showWifiStatus() {
+    Serial.print(F("M Status is "));
+    switch (WiFi.status()) {
+        case WL_CONNECT_FAILED: 
+        Serial.println(F("Connect Failed")); break;
+        case WL_CONNECTION_LOST: 
+        Serial.println(F("Connection Lost")); break;
+        case WL_DISCONNECTED: 
+        Serial.println(F("Disconnected")); break;
+        case WL_CONNECTED: 
+        Serial.println(F("Connected")); break;
+        default:
+        Serial.println(WiFi.status());
+    }
+}
+
+
 void connectWiFi() {
     Client1Connected = false;
     Client2Connected = false;
-
-#if defined(STATIC_WIFI)
-    int counter = 0;
-    // Connect to WiFi network
     WiFi.mode(WIFI_STA);
     delay (1000);    
     if (WiFi.status() != WL_CONNECTED) {
+#if defined(STATIC_WIFI)
 #if defined(TFT_DISPLAY) 
         tft.setCursor(0,0);
-        tft.print(F("Conecting WiFi to "));
-        tft.print(ssid);
+        tft.print(F("Conecting WiFi to ")); tft.print(ssid);
 #endif
-        Serial.print(F("M Connecting WiFi to "));
-        Serial.println(ssid);
-        WiFi.begin(ssid, password);                 // authenticate 
+        uint8_t counter = 0;
+        Serial.print(F("M Connecting WiFi to ")); Serial.println(ssid);
+        WiFi.begin(ssid, password);                 // connect with compiled strings
         while (WiFi.status() != WL_CONNECTED) {
-            Serial.print(F("M Status is "));
-            switch (WiFi.status()) {
-              case WL_CONNECT_FAILED: 
-                Serial.println(F("Connect Failed"));
-                break;
-              case WL_CONNECTION_LOST: 
-                Serial.println(F("Connection Lost"));
-                break;
-              case WL_DISCONNECTED: 
-                Serial.println(F("Disconnected"));
-                break;
-              case WL_CONNECTED: 
-                Serial.println(F("Connected"));
-                break;
-              default:
-                Serial.println(WiFi.status());
-            }
+            showWifiStatus();
             delay(1000);
             counter++;
-
-            if (counter > 3) {
+            if (counter > 2) {
 #if defined(TFT_DISPLAY)    
                 tft.setCursor(0,0);
-                tft.print(F("Retry conecting WiFi to"));
-                tft.print(ssid);
+                tft.print(F("Retry conecting WiFi to")); tft.print(ssid);
 #endif
                 Serial.println(F("M Retry connecting WiFi"));
-                WiFi.begin(ssid, password);         // authenticate again
+                WiFi.begin(ssid, password);         // restart connecting
                 delay (1000);
-                counter = 0;
+                counter = 0;                        // do forever until connected with retries
             }
         }    
-    }
-#else
-    WiFiManager wifiManager;
-    wifiManager.autoConnect();
+#else                                               // connect using WifiManager if auto reconnect not successful
+#if defined(TFT_DISPLAY) 
+        tft.setCursor(0,0);
+        tft.print(F("try reonecting WiFi"));
 #endif
+        Serial.print(F("M Try reconnecting WiFi"));
+        WiFi.begin();             
+        delay(1000);
+        showWifiStatus();
+        if (WiFi.status() != WL_CONNECTED) {
+#if defined(TFT_DISPLAY)    
+            tft.setCursor(0,0);
+            tft.print(F("Retry reconecting WiFi"));
+#endif
+            Serial.println(F("M Retry reconnecting WiFi"));
+            WiFi.begin();         
+            delay (1000);
+        }    
+        WiFiManager wifiManager;
+        wifiManager.autoConnect();
+#endif
+    }
     printConnection (&Serial);
-
-    // Start the server
-    Server.begin();
+    Server.begin();                     // Start the TCP server
     Serial.println(F("M Server started"));
 }
 
@@ -2081,37 +2106,34 @@ void detectTrigger(int val) {
     
     if (ledOutPin)
         digitalWrite(ledOutPin, triggerState);
-        
-        // todo: wrong indentation follows ...
 
-        short pinIndex = allowedPins[analogInPin];  // ESP pin A0 (pinIndex 8, internal 17) or Arduino A7 (pinIndex 17, internal 21)
-        uint32_t now = millis();
-        doCount (pinIndex, triggerState, now);      // do the counting, history and so on
-        
+    short pinIndex = allowedPins[analogInPin];  // ESP pin A0 (pinIndex 8, internal 17) or Arduino A7 (pinIndex 17, internal 21)
+    uint32_t now = millis();
+    doCount (pinIndex, triggerState, now);      // do the counting, history and so on
+    
 #ifdef debugPins
-        if (devVerbose >= 10) {
-            short rPin = internalPins[pinIndex];
-            Output->print(F("M pin "));
-            Output->print(analogInPin);
-            Output->print(F(" (index "));
-            Output->print(pinIndex);
-            Output->print(F(", internal "));
-            Output->print(rPin);
-            Output->print(F(" ) "));
-            Output->print(F(" to "));
-            Output->print(nextState);
+    if (devVerbose >= 10) {
+        short rPin = internalPins[pinIndex];
+        Output->print(F("M pin "));
+        Output->print(analogInPin);
+        Output->print(F(" (index "));
+        Output->print(pinIndex);
+        Output->print(F(", internal "));
+        Output->print(rPin);
+        Output->print(F(" ) "));
+        Output->print(F(" to "));
+        Output->print(nextState);
 #ifdef pulseHistory                     
-            Output->print(F("  histIdx "));
-            Output->print(histIndex);
+        Output->print(F("  histIdx "));
+        Output->print(histIndex);
 #endif                  
-            Output->print(F("  count "));
-            Output->print(counter[pinIndex]);
-            Output->print(F("  reject "));
-            Output->print(rejectCounter[pinIndex]);
-            Output->println();
-        }
-#endif
+        Output->print(F("  count "));
+        Output->print(counter[pinIndex]);
+        Output->print(F("  reject "));
+        Output->print(rejectCounter[pinIndex]);
+        Output->println();
     }
+#endif
 }
 
 void readAnalog() {
@@ -2229,13 +2251,14 @@ void setup() {
 
 /*   Main Loop  */
 void loop() {
-    handleTime();
-    if (Serial.available()) handleInput(Serial.read());
+    handleTime();                           // check if millis() wrapped (for reporting)
+    if (Serial.available()) 
+        handleInput(Serial.read());         // input over serial 
 #ifdef WifiSupport    
-    handleConnections();
+    handleConnections();                    // new TCP connection or input over TCP
 #endif
 #ifdef analogIR
-    readAnalog();
+    readAnalog();                           // analog measurements
 #endif
 #ifdef debugPins
     if (devVerbose >= 10) {
@@ -2243,6 +2266,6 @@ void loop() {
     }
 #endif
     if (reportDue()) {    
-        report();
+        report();                           // report counts
     }
 }
