@@ -55,6 +55,10 @@
     pin 36, 1000 ppu, kWh, 3600 (show per hour), kW, 0 (36,1000,107+87*256,104,3600,107+87*256,0)  ->  36,1000,22379,104,3600,22379,0u
     or
     pin 35, 36 ppl, l, 60, l/m    (35,36,108,60,108+47*256,109p)  ->  35,36,108,60,12140,109u
+
+    flash OTA: 
+    e.g. espota.py -i192.168.x,y -p 3232 -f ./FHEM/firmware/ArduCounter-ESP32T.bin
+    if needed download espota from https://github.com/esp8266/Arduino/blob/master/tools/espota.py
 */
 
 /*
