@@ -24,28 +24,38 @@
  * A0-A5 (D14-D19) = PCINT 8-13 =  PCIR1 = PC = PCIE1 = pcmsk1
  */
 
-/* test cmds analog ESP 8266:
- *  20v               Verbose
- *  17,3,0,50a        A0, rising, no Pullup, MinLen 50
- *  15,25t            Level Diff Thresholds
- *  
- * for ESP8266 with D5 falling pullup 30
- *  5,2,1,30a
- *  20v
- *  10,20,1,1i
- * 
- * for ESP32 pin 23
- * 23,2,1,50a
- * 10,20,1,1i
- * 
- * for ESP32 with A0 = 36
- * 36,3,0,50a
- * 25v
- * TTGO T-Display has right button at GPIO 35
- * 35,3,0,50a
- * 36,3,0,50,27a
- * 
- */
+/* test cmds 
+
+    Nano analog
+    21,2,0,50,2,98,115  A7=21, falling, no pullup, min 50, ir-out 2, thresholds 98/115
+
+    analog ESP 8266:
+    20v               Verbose
+    17,3,0,50a        A0, rising, no Pullup, MinLen 50
+    15,25t            Level Diff Thresholds
+ 
+    for ESP8266 with D5 falling pullup 30
+    5,2,1,30a
+    20v
+    10,20,1,1i
+ 
+    for ESP32 pin 23
+    23,2,1,50a
+    10,20,1,1i
+ 
+    for ESP32 with A0 = 36
+    36,3,0,50a
+    25v
+ 
+    TTGO T-Display has right button at GPIO 35
+    35,2,0,50a
+    36,3,0,50,27a
+
+    pulses cfg  
+    pin 36, 1000 ppu, kWh, 3600 (show per hour), kW, 0 (36,1000,107+87*256,104,3600,107+87*256,0)  ->  36,1000,22379,104,3600,22379,0u
+    or
+    pin 35, 36 ppl, l, 60, l/m    (35,36,108,60,108+47*256,109p)  ->  35,36,108,60,12140,109u
+*/
 
 /*
     Changes:
@@ -95,7 +105,7 @@
         22.4.18 - many changes, delay report if tcp mode and disconnected, verbose levels, ...
         13.5.18 - V2.36 Keepalive also on Arduino side
         9.12.18 - V3.0 start implementing analog input for old ferraris counters
-        6.1.19  - V3.1 showIntervals in hello
+        6.1.19  - V3.1 printIntervals in hello
         19.1.19 - V3.12 support for ESP with analog
         24.2.19 - V3.13 fix internal pin to GPIO mapping (must match ISR functions) when ESP8266 and analog support       
                 - V3.14 added return of devVerbose upon startup
@@ -111,36 +121,18 @@
         21.12.19 - V4.10 Support for TTGO Lilygo Board (T-Display) with ST7789V 1,14 Zoll Display (240x135) see https://github.com/Xinyuan-LilyGO/TTGO-T-Display
                         or https://de.aliexpress.com/item/33048962331.html?spm=a2g0o.store_home.hotSpots_212315783.0
         30.12.19 - V4.20 started to make analog support user defineable at runtime
-            reconnect when wifi is lost (see e.g. https://medium.com/diy-my-smart-home/esp-tipp-wifi-reconnect-einbauen-dc4a7397b741), was a bug,
-            https://github.com/espressif/arduino-esp32/issues/2501
-            https://github.com/jantenhove/GoodWeLogger/pull/20
-            set autoReConnect: https://github.com/esp8266/Arduino/blob/master/doc/esp8266wifi/station-class.rst#setautoreconnect
-            Doku: https://github.com/esp8266/Arduino/blob/master/doc/esp8266wifi/station-class.rst
-            Source: https://github.com/espressif/arduino-esp32/blob/master/libraries/WiFi/src/WiFi.h
-
+            reconnect when wifi is lost 
         20.1.2020 - rewrite many things ...
-
+        2.2.2020 integrate ESPOTA - see https://raw.githubusercontent.com/esp8266/Arduino/master/tools/espota.py
+        30.4.2020 V4.25 - show if compiled with display support, debug tcp disconnects
+        12.5.2020 V4.26 - restore fixes after a crash (resetWifi, displayMode 3, change commandData to uint32_t)
 
     ToDo / Ideas:
-        combine arrays (see below) - BitFields? https://en.cppreference.com/w/cpp/language/bit_field
-
-        let analog pins be defined at runtime, save configuration for analog pins
-        make analogInterval available in Fhem
-        save analogInterval to Flash
-        detect analog Threasholds automatically and adjust over time
-        
-        restructure ISRs // see https://github.com/arduino/Arduino/pull/4519, use attachInterrputArg on ESPs and AVR as soon as available
-            https://github.com/arduino/ArduinoCore-avr/issues/85
-            https://github.com/arduino/ArduinoCore-API/issues/95
-            https://github.com/arduino/ArduinoCore-avr/pull/58
-            https://www.bountysource.com/issues/30477489-support-extra-parameter-on-attachinterrupt
-
-
-        OTA Update if wireless: https://github.com/espressif/arduino-esp32/tree/master/libraries/ArduinoOTA (via webserver)
-        Better integrate TFT Display - https://github.com/Xinyuan-LilyGO/TTGO-T-Display
-
-    
+        max 10 printData entries, displayMode to cycle through pins to display in different views        
+        detect analog Thresholds automatically and adjust over time
+        printPinHistory could be called independent of report to avoid of losing history data
 */ 
+
 #include <Arduino.h>
 
 #if defined(TFT_DISPLAY)
@@ -150,54 +142,68 @@
 #include <Button2.h>
 #include "esp_adc_cal.h"
 /*#include "bmp.h"*/
-TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h   todo: select TFT as -D in platformio.ini instead
-uint8_t lineCount;
+TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h or as -D in platformio.ini
+uint8_t lineCount;          // initialized in each report call
+
+#define TFT_BUTTON 0
+#define displayModeMax 3
+Button2 buttonA = Button2(TFT_BUTTON);
+uint8_t displayMode = 1;
 #endif
-
-/* allow printing of every pin change to Serial */
-#define debugPins 1  
-
-/* allow tracking of pulse lengths */
-#define pulseHistory 1
 
 #include "pins_arduino.h"
 #include <EEPROM.h>
 
-const char versionStr[] PROGMEM = "ArduCounter V4.20";
+const char versionStr[] PROGMEM = "ArduCounter V4.26";
 
-#define SERIAL_SPEED 38400      // todo: increase?
-#define MAX_INPUT_NUM 8
+// even with 38400 one report takes less than 1ms. However printing the report on the tft takes 2ms!
+// but if analog interval is set to 10 or less and we output a lot to serial (devVerbose 50) then 
+//     background tasks (serial?) eat up 5ms per round...
+//     this is much better at 115200! (obviously serial io is done interrupt driven at same core)
+// TCP io also creates delays of 15-20ms between loop calls
+// show cmd also takes > 10 ms 
+// serial output of hello msg takes long because the serial buffer is too small so Serial.print takes longer ...
+
+//#define SERIAL_SPEED 38400
+#define SERIAL_SPEED 115200
+#define MAX_INPUT_NUM 16
 
 #define pin2GPIO(P) ( pgm_read_byte( digital_pin_to_gpio_PGM + (P) ) )
 #define FF 255
 
 #if defined(ESP8266) || defined(ESP32)  // Wifi stuff
 #define WifiSupport 1
+
 #if defined(ESP8266)
 #include <ESP8266WiFi.h>          
 #elif defined(ESP32)
 #include <WiFi.h>          
 #endif
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 
 #if defined(STATIC_WIFI)
 #include "ArduCounterTestConfig.h"
 #else
-#include <WiFiManager.h>   
+#include <WiFiManager.h>
+WiFiManager wifiManager;
 #endif
 
 WiFiServer Server(80);              // For ESP WiFi connection
 WiFiClient Client1;                 // active TCP connection
 WiFiClient Client2;                 // secound TCP connection to send reject message
+boolean serverStarted;              // to show the status once
 
-boolean Client1Connected;           // remember state of TCP connection
-boolean Client2Connected;           // remember state of TCP connection
 
-boolean tcpMode = false;
+boolean TCPconnected;               // remember state of TCP connection so loss can be reported
+boolean tcpMode = false;            // remember if we had a tcp connection so we can delay report if disconnected
 uint8_t delayedTcpReports = 0;      // how often did we already delay reporting because tcp disconnected
 uint32_t lastDelayedTcpReports = 0; // last time we delayed
 
 uint16_t keepAliveTimeout = 200;
 uint32_t lastKeepAlive;
+uint32_t lastReconnectTry;
+int reconnects = 0;
 
 #endif
 
@@ -216,7 +222,8 @@ void CmdWait();
 void CmdDevVerbose();
 void CmdKeepAlive();
 void CmdQuit();
-void printConnection(Print *Out);
+void printWifiState(Print *Out);
+void handleInput(char c);
 
 
 /* ESP8266 pins that are typically ok to use 
@@ -247,9 +254,9 @@ const uint8_t PROGMEM digital_pin_to_gpio_PGM[] = {
  
 #elif defined(ESP32)                // ESP32 variables and definitions
 #define MAX_PIN 12
-#define MAX_HIST 20                 // 20 history entries for ESP boards (can be increased)
+#define MAX_HIST 100                // 100 history entries for ESP boards (can be increased)
 #define MAX_APIN 40
-#if defined(TFT_DISPLAY)
+#if defined(TFT_DISPLAY)            // TTGO T-Display
 const uint8_t PROGMEM digital_pin_to_gpio_PGM[] = {
     FF, FF, FF, FF,                 // pwm at boot, debug, LED, high at boot
     04, FF, FF, FF,                 // 4 is ok, pwm at boot, 
@@ -261,12 +268,13 @@ const uint8_t PROGMEM digital_pin_to_gpio_PGM[] = {
     FF, FF, FF, FF,
     32, 33, 34, 35,                 // 32-35 avaliable (34/35 input only, 35 is right button)
     36, FF, FF, 39};                // 36 is A0, is 39 avaliable but also input only
-#else
+
+#else                               // normal ESP32 Devboard
 const uint8_t PROGMEM digital_pin_to_gpio_PGM[] = {
     FF, FF, FF, FF,                 // pwm at boot, debug, LED, high at boot
     04, FF, FF, FF,                 // 4 is ok, pwm at boot, 
     FF, FF, FF, FF,                 // 6-11 is flash
-    FF, FF, FF, FF,                 // 12 is used at boot, 12-15 used for JTAG, otherwise 13 is ok, 14/15 output pwm
+    FF, FF, FF, FF,                 // 12 is used at boot, 12-15 for JTAG, otherwise 13 is ok, 14/15 output pwm
     16, 17, 18, 19,
     FF, 21, 22, 23,                 // 21-23 avaliable   
     FF, 25, 26, 27,                 // 25-26 avaliable, use 27 as irOut
@@ -276,24 +284,24 @@ const uint8_t PROGMEM digital_pin_to_gpio_PGM[] = {
 #endif
 
 
-#elif defined(__AVR_ATmega328P__)
+#elif defined(__AVR_ATmega328P__)   // Arduino Nano
 #define MAX_HIST 20                 // 20 history entries for arduino boards
 #define MAX_PIN 12                  // max 20 counting pins at the same time
 #define MAX_APIN 22
 const uint8_t PROGMEM digital_pin_to_gpio_PGM[] = {
-    FF,  FF,  D2,  D3,              // 2 is typically ir out for analog,
-    D4,  D5,  D6,  D7,
-    D8,  D9,  D10, D11,
-    D12, D13, A0,  A1,              // 12 often is led out
-    A2,  A3,  A4,  A5,
-    A6,  A7                         // A7 is typically analog in for ir
+    FF, FF,  2,  3,                 // 2 is typically ir out for analog,
+     4,  5,  6,  7,
+     8,  9, 10, 11,
+    12, 13, A0, A1,                 // 12 often is led out
+    A2, A3, A4, A5,
+    A6, A7                          // A7 is typically analog in for ir
 };
   
 uint8_t pinIndexMap[MAX_APIN];      // map needed by 328p isr to map back from aPin to pinIndex in pinData
 uint8_t firstPin[] = {8, 14, 0};    // first and last pin at port PB, PC and PD for arduino uno/nano
 uint8_t lastPin[]  = {13, 19, 7};   // not really needed. Instead check bit position (or bit != 0)
-uint8_t *port_to_pcmask[] = {&PCMSK0, &PCMSK1, &PCMSK2};    // Pin change mask for each port on arduino platform
-volatile static uint8_t PCintLast[3];   // last PIN States at io port to detect pin changes in arduino ISR
+volatile uint8_t *port_to_pcmask[] = {&PCMSK0, &PCMSK1, &PCMSK2};    // Pin change mask for each port on arduino
+volatile uint8_t PCintLast[3];      // last PIN States at io port to detect pin changes in arduino ISR
 #endif                              // end of Nano / Uno specific stuff
 
 
@@ -301,15 +309,26 @@ Print *Output;                      // Pointer to output device (Serial / TCP co
 uint32_t bootTime;                  
 uint16_t bootWraps;                 // counter for millis wraps at last reset
 uint16_t millisWraps;               // counter to track when millis counter wraps 
-uint32_t lastMillis;                // milis at last main loop iteration
-uint8_t devVerbose;                 // >=10 shows pin changes, >=5 shows pin history
+uint32_t lastMillis;                // milis at last main loop iteration - initialized in setup()
+uint32_t lastTimeMillis;            // millis at last show time
+
+uint8_t enableHistory;              // new flag to control collecting and reporting pin history
+uint8_t enableSerialEcho;           // echo tcp output on serial
+uint8_t enablePinDebug;             // show digital pin changes
+uint8_t enableAnalogDebug;          // show analog level sampling
+uint8_t enableDevTime;              // show device Time every hour
 
 uint32_t intervalMin = 30000;       // default 30 sec - report after this time if nothing else delays it
 uint32_t intervalMax = 60000;       // default 60 sec - report after this time if it didin't happen before
 uint32_t intervalSml =  2000;       // default 2 secs - continue if timeDiff is less and intervalMax not over
 uint16_t countMin    =     2;       // continue counting if count is less than this and intervalMax not over
-uint8_t ledOutPin;
+
+uint8_t ledOutPin;                  // todo: not implemented 
+
 uint32_t lastReportCall;
+#if defined(TFT_DISPLAY)
+uint32_t lastPrintFlowCall;
+#endif
 
 
 typedef struct pinData {
@@ -327,7 +346,7 @@ typedef struct pinData {
     volatile uint32_t intervalStart;            // time of first impulse in interval
     volatile uint32_t intervalEnd;              // time of last impulse in interval
     volatile uint32_t pulseWidthSum;            // sum of all pulse widthes during interval (for average)
-    volatile uint8_t counterIgn;                // counts only first pulse that marks the begin of the very first interval
+    volatile uint8_t counterIgn;                // counts first pulse that marks begin of the very first interval
 
     // isr internal states
     volatile uint8_t initialized;               // set if first pulse has ben seen to start interval
@@ -347,25 +366,27 @@ pinData_t pinData[MAX_PIN];
 uint8_t maxPinIndex = 0;                        // the next available index (= number of indices used)
 
 typedef struct analogData {
-    pinData_t *inPinData;                       // pointer to pinData structure for input pin (used e.g. to call doCount from analogRead)
+    pinData_t *inPinData;                       // pointer to pinData structure for input pin (to call doCount)
     uint8_t inPinName;                          // printed pin Number for user input / output (optinal here?)
     uint8_t outPinName;                         // printed pin number to use for ir (convert using our macro)
-    uint16_t thresholdMin;                      // measurement for 0 level                  todo: change all occurrences to this array
+    uint16_t thresholdMin;                      // measurement for 0 level
     uint16_t thresholdMax;                      // measurement for 1 
     uint8_t triggerState;                       // which level was it so far
     uint16_t sumOff = 0;                        // sum of measured values during light off
     uint16_t sumOn  = 0;                        // sum of measured values during light on
+    uint16_t avgCnt = 0;                        // counter for average during one level
+    uint32_t avgSum = 0;                        // sum for average during one level
 } analogData_t;
 
 #define MAX_ANALOG 2
 analogData_t analogData[MAX_ANALOG];
 uint8_t maxAnalogIndex = 0;                     // the next available index
 
-#ifdef pulseHistory 
 typedef struct histData {
     volatile uint16_t seq;                      // history sequence number
     volatile uint8_t pin;                       // pin for this entry
-    volatile uint8_t level;                     // level for this entry (was index and should by pinName)
+    volatile uint8_t level;                     // gap/signal level for this entry 
+    volatile uint16_t aLvl;                     // average analog level for this entry
     volatile uint32_t time;                     // time for this entry
     volatile uint32_t len;                      // time that this level was held
     volatile char act;                          // action (count, reject, ...) as one char
@@ -374,24 +395,37 @@ typedef struct histData {
 histData_t histData[MAX_HIST];
 volatile uint8_t histIndex;                     // pointer to next entry in history ring
 volatile uint16_t histNextSeq;                  // next seq number to use
-#endif
+uint16_t histLastOut;                           // seqnuence of last entry already reported
 
-uint16_t commandData[MAX_INPUT_NUM];            // input data over serial port or network
+uint32_t commandData[MAX_INPUT_NUM];            // input data over serial port or network
 uint8_t  commandDataPointer = 0;                // index pointer to next input value
 uint8_t  commandDataSize = 0;                   // number of input values specified in commandData array
 char     commandLetter;                         // the actual command letter
-uint16_t commandValue = 0;                      // the current value for input function
+uint32_t commandValue = 0;                      // the current value for input function
 
 
 uint32_t analogReadLast;            // millis() at last analog read
+uint32_t analogReadWait;            // millis() during state machine 
 uint16_t analogReadInterval = 50;   // interval at which to read analog values (miliseconds)
 uint8_t analogReadState = 0;        // to keep track of switching LED on/off, measuring etc.
 uint8_t analogReadAmp = 3;          // amplification for display
 uint8_t analogReadSamples = 4;      // samples to take with the light off - max 16 so sum can be an int 16
 uint8_t analogReadCount = 0;        // counter for sampling
 
+uint32_t analogCallLast = 0;        // last analog read call for debugging delays
 
-// idea: save analog measurement during same level as sum and count to get average and then put in history when doCount is called so that threshold can be auto adjusted or even self learning?
+#define MAX_UNIT 5                  // 4 characters and a trailing zero
+typedef struct printData {
+    uint8_t pin;                    // pin number that this unit information is for
+    uint32_t pulsesPerUnit;         // number of pulses counted per unit
+    uint32_t pulsesPerUnitDiv;      // divisor for ppu
+    char unit[MAX_UNIT];            // unit e.g. "l" or "kWh"
+    uint32_t flowUnitFactor;        // to get from secounds to minutes or hours as desired
+    char flowUnit[MAX_UNIT];        // flow unit e.g. "7/h" or "W"
+    uint32_t intervalStart;
+    uint32_t lastCount;
+} printData_t;
+printData_t printData;
 
 
 void initPinVars(pinData_t *pd, uint32_t now) {
@@ -413,11 +447,23 @@ void initPinVars(pinData_t *pd, uint32_t now) {
         level = digitalRead(pin2GPIO(pd->pinName));
     pd->lastLevel = level;
     pd->lastLongLevel = level;
-#ifdef debugPins
-    pd->lastDebugLevel = level;       // for debug output
-#endif
+    pd->lastDebugLevel = level;     // for debug output
 }
 
+
+void initHistVars() {
+    histIndex = 0;
+    histNextSeq = 1;
+    for (uint8_t hIdx=0; hIdx < MAX_HIST; hIdx++) {
+        histData_t *hd = &histData[hIdx];
+        hd->seq = 0;
+        hd->pin = FF;
+        hd->level = 0;
+        hd->time = 0;
+        hd->len = 0;
+        hd->act = ' ';
+    }
+}
 
 void initialize() {
     uint32_t now = millis();
@@ -425,19 +471,44 @@ void initialize() {
     bootWraps = millisWraps;    
     lastReportCall = now;       // time for first output after intervalMin from now
     analogReadLast = now;
-    devVerbose = 0;
+    histLastOut = 0;
+    lastTimeMillis = now;
+
+    enableHistory = 0;          // pin change history
+    enableSerialEcho = 0;       // echo tcp output on serial
+    enablePinDebug = 0;         // show digital pin changes
+    enableAnalogDebug = 0;      // analog changes
+    enableDevTime = 0;          // show device time 
+
+
+    maxPinIndex = 0;
+    maxAnalogIndex = 0;
+    analogReadState = 0;
+    initHistVars();
     for (uint8_t pinIndex=0; pinIndex < MAX_PIN; pinIndex++)
-        initPinVars(&pinData[pinIndex], now);                   // todo: is this still needed now that there is maxPinIndex?
+        initPinVars(&pinData[pinIndex], now);                   // not necessary but initialize anyway
+#if defined TFT_DISPLAY        
+    displayMode = 1;
+    printData.intervalStart = now;
+    printData.lastCount = 0;
+    lastPrintFlowCall = now;    
+#endif    
 #if defined(__AVR_ATmega328P__)        
     for (uint8_t aPin=0; aPin < MAX_APIN; aPin++)
         pinIndexMap[aPin] = FF;
 #endif        
-#ifdef WifiSupport  
+#if defined(WifiSupport)
     lastKeepAlive = now;
+    serverStarted = false;
+    lastReconnectTry = now;
+    delayedTcpReports = 0;     
+    lastDelayedTcpReports = 0; 
+    reconnects = 0;
 #endif      
     restoreFromEEPROM();
     clearInput();
 }
+
 
 // search pinData for aPin and return the pinIndex
 uint8_t findInPin (uint8_t aPin) {
@@ -485,7 +556,7 @@ void clearInput() {
 void PrintErrorMsg() {
     Output->print(F("Error: "));
     Output->print(F("command "));
-    Output->println(commandLetter);
+    Output->print(commandLetter);
     Output->print(F(" "));
 }
 
@@ -505,7 +576,7 @@ void printVersionMsg() {
     }
     Output->print(F(" on "));
 #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
-#ifdef ARDUINO_AVR_NANO
+#if defined (ARDUINO_AVR_NANO)
     Output->print(F("NANO"));
 #else 
     Output->print(F("UNO"));
@@ -516,12 +587,17 @@ void printVersionMsg() {
     Output->print(F("Mega"));
 #elif defined(ESP8266)
     Output->print(F("ESP8266"));
+#elif defined(ESP32)
+    Output->print(F("ESP32"));
 #else
     Output->print(F("UNKNOWN"));
 #endif
-#ifdef ARDUINO_BOARD
+#if defined (ARDUINO_BOARD)
     Output->print(F(" "));
     Output->print(F(ARDUINO_BOARD));
+#endif
+#if defined (TFT_DISPLAY)
+    Output->print(F(" with display"));
 #endif
     Output->print(F(" compiled "));
     Output->print(F(__DATE__ " " __TIME__));
@@ -530,21 +606,37 @@ void printVersionMsg() {
     Output->print(F(" with core version "));
     Output->print(F(ARDUINO_ESP8266_RELEASE));
 #endif
+#if defined (ARDUINO_ESP32_RELEASE)
+    Output->print(F(" with core version "));
+    Output->print(F(ARDUINO_ESP32_RELEASE));
+#endif
 #endif    
 }
 
 
-bool checkVal(uint8_t index, uint16_t min, uint16_t max, bool doErr = true) {
+void printPinChangeDebug(pinData_t *pd, uint8_t pinState) {
+    pd->lastDebugLevel = pinState;
+    Output->print(F("M pin "));       Output->print(pd->pinName);
+    Output->print(F(" changed to ")); Output->print(pinState);
+    Output->print(F(", histIdx "));   Output->print(histIndex);
+    Output->print(F(" seq "));        Output->print(histData[histIndex].seq);
+    Output->print(F(", count "));     Output->print(pd->counter);
+    Output->print(F(", reject "));    Output->print(pd->rejectCounter);
+    Output->println();
+}
+
+
+bool checkVal(uint8_t index, uint16_t min, uint16_t max = 0, bool doErr = true) {
     if (index >= commandDataSize) {
         if (doErr) {
             PrintErrorMsg();
-            Output->print(F("missing parameter number ")); Output->println(index);
+            Output->print(F("missing parameter number ")); Output->println(index+1);
         }
         return false;
     }
-    if (commandData[index] < min || commandData[index] > max) {
+    if (commandData[index] < min || (max > 0 && commandData[index] > max)) {
         PrintErrorMsg();
-        Output->print(F("parameter number ")); Output->print(index);
+        Output->print(F("parameter number ")); Output->print(index+1);
         Output->print(F(" (value "));          Output->print(commandData[index]);
         Output->println(F(") is out of bounds"));
         return false;
@@ -561,7 +653,7 @@ bool checkVal(uint8_t index, uint16_t min, uint16_t max, bool doErr = true) {
    intervalEnd[] is set here and in report
    intervalStart[] is set in case a pin was not initialized yet and in report
 */
-static void doCount(pinData_t *pd, uint8_t level) {
+static void doCount(pinData_t *pd, uint8_t level, uint16_t analogLevel=0) {
     uint32_t now = millis();
     uint32_t len = now - pd->lastChange;
     char act = ' ';
@@ -582,6 +674,7 @@ static void doCount(pinData_t *pd, uint8_t level) {
                 pd->intervalEnd = now;                  // remember time in case pulse is last in the interval
                 if (!pd->initialized) {
                     pd->intervalStart = now;            // if first impulse on this pin -> start interval now
+                    printData.intervalStart = now;
                     pd->initialized = true;             // and start counting the next impulse (counter is 0)
                     pd->counterIgn++;                   // count ignored for diff because defines start of intv
                 }
@@ -593,16 +686,17 @@ static void doCount(pinData_t *pd, uint8_t level) {
         }       
         pd->lastLongLevel = pd->lastLevel;              // remember this valid level as lastLongLevel
     }
-#ifdef pulseHistory   
-    if (++histIndex >= MAX_HIST) histIndex = 0;
-    histData_t *hd = &histData[histIndex];              // write pin history
-    hd->seq   = histNextSeq++;
-    hd->pin   = pd->pinName;
-    hd->time  = pd->lastChange;
-    hd->level = pd->lastLevel;
-    hd->len   = len;
-    hd->act   = act;
-#endif  
+    if (enableHistory) {
+        if (++histIndex >= MAX_HIST) histIndex = 0;
+        histData_t *hd = &histData[histIndex];              // write pin history
+        hd->seq   = histNextSeq++;                          // fhem side detects wrapping
+        hd->pin   = pd->pinName;
+        hd->time  = pd->lastChange;
+        hd->level = pd->lastLevel;
+        hd->aLvl  = analogLevel;
+        hd->len   = len;
+        hd->act   = act;
+    }
     pd->lastChange = now;
     pd->lastLevel  = level;
 }
@@ -610,41 +704,64 @@ static void doCount(pinData_t *pd, uint8_t level) {
 
 /* Interrupt handlers and their installation  */
 
-#if defined(__AVR_ATmega328P__)
 
-/* Add a pin to be handled (Arduino code) */
-uint8_t AddPinChangeInterrupt(uint8_t rPin) {
+#if defined(ESP8266) || defined(ESP32)
+void IRAM_ATTR ESPISR(void* arg) {                      // common ISR for all Pins on ESP
+    // ESP32 now also defines IRAM_ATTR as ICACHE_RAM_ATTR
+    pinData_t *pd = (pinData_t *)arg;
+    doCount(pd, digitalRead(pin2GPIO(pd->pinName)));
+}
+#endif
+
+
+/* Add a pin to be handled */
+uint8_t AddPinChangeInterrupt(uint8_t pinIndex) {
+    uint8_t aPin = pinData[pinIndex].pinName;
+    uint8_t rPin = pin2GPIO(aPin);
+#if defined(ESP8266) || defined(ESP32)
+    attachInterruptArg(digitalPinToInterrupt(rPin), ESPISR, &pinData[pinIndex], CHANGE);
+#elif defined(__AVR_ATmega328P__)
     volatile uint8_t *pcmask;                       // pointer to PCMSK0 or 1 or 2 depending on the port corresponding to the pin
     uint8_t bitM = digitalPinToBitMask(rPin);       // mask to bit in PCMSK to enable pin change interrupt for this arduino pin 
     uint8_t port = digitalPinToPort(rPin);          // port that this arduno pin belongs to for enabling interrupts
     if (port == NOT_A_PORT) 
         return 0;
+    pinIndexMap[aPin] = pinIndex;
     port -= 2;                                      // from port (PB, PC, PD) to index in our array
     PCintLast[port] = *portInputRegister(port+2);   // save current inut state to detect changes in isr
     pcmask = port_to_pcmask[port];                  // point to PCMSK0 or 1 or 2 depending on the port corresponding to the pin
     *pcmask |= bitM;                                // set the pin change interrupt mask through a pointer to PCMSK0 or 1 or 2 
     PCICR |= 0x01 << port;                          // enable the interrupt
+#endif    
     return 1;
 }
 
 
-/* Remove a pin to be handled (Arduino code) */
-uint8_t RemovePinChangeInterrupt(uint8_t rPin) {
+/* Remove a pin to be handled */
+uint8_t RemovePinChangeInterrupt(uint8_t pinIndex) {
+    uint8_t aPin = pinData[pinIndex].pinName;
+    uint8_t rPin = pin2GPIO(aPin);
+#if defined(ESP8266) || defined(ESP32)
+    detachInterrupt(digitalPinToInterrupt(rPin));
+#elif defined(__AVR_ATmega328P__)
     volatile uint8_t *pcmask;
     uint8_t bitM = digitalPinToBitMask(rPin);
     uint8_t port = digitalPinToPort(rPin);
     if (port == NOT_A_PORT)
         return 0;
+    pinIndexMap[aPin] = FF;
     port -= 2;                                  // from port (PB, PC, PD) to index in our array
     pcmask = port_to_pcmask[port];          
     *pcmask &= ~bitM;                           // clear the bit in the mask.
     if (*pcmask == 0) {                         // if that's the last one, disable the interrupt.
         PCICR &= ~(0x01 << port);
     }
+#endif    
     return 1;
 }
 
 
+#if defined(__AVR_ATmega328P__)
 /* 
    common function for arduino pin change interrupt handlers. 
    "port" is the PCINT port index (0-2) as passed from above, 
@@ -675,7 +792,6 @@ static void PCint(uint8_t port) {
 }
 
 
-// now set the arduino interrupt service routines and call the common handler with the port index number
 ISR(PCINT0_vect) {
     PCint(0);
 }
@@ -686,99 +802,164 @@ ISR(PCINT2_vect) {
     PCint(2);
 }
 
-#elif defined(ESP8266) || defined(ESP32)
+#endif
 
-void IRAM_ATTR ESPISR(void* arg) {                      // common ISR for all Pins on ESP
-    // ESP32 now also defines IRAM_ATTR as ICACHE_RAM_ATTR
-    pinData_t *pd = (pinData_t *)arg;
-    doCount(pd, digitalRead(pin2GPIO(pd->pinName)));
+
+void printAvailablePins() {
+    Output->print(F("C"));
+    boolean first = true;
+    for (uint8_t aPin=0; aPin < MAX_APIN; aPin++)
+        if (pin2GPIO(aPin) != FF) {
+            if (!first)
+                Output->print(F(","));
+            first = false;
+            Output->print(aPin);            // show available pins
+        }
+    Output->println();
+}
+
+
+void printTime(uint32_t now) {
+    Output->print(F("N")); Output->print(now);
+    Output->print(F(",")); Output->print(millisWraps);
+    Output->print(F("B")); Output->print(bootTime);
+    Output->print(F(",")); Output->print(bootWraps);    
+    Output->println();
+}
+    
+
+void printIntervals() {
+    Output->print(F("I"));  Output->print(intervalMin / 1000);
+    Output->print(F(","));  Output->print(intervalMax / 1000);
+    Output->print(F(","));  Output->print(intervalSml / 1000);
+    Output->print(F(","));  Output->print(countMin);
+    Output->print(F(","));  Output->print(analogReadInterval);
+    Output->print(F(","));  Output->print(analogReadSamples);
+    Output->println();
+}
+
+
+void printVerboseFlags() {
+    Output->print(F("V")); Output->print(enableHistory);     
+    Output->print(F(",")); Output->print(enableSerialEcho);  
+    Output->print(F(",")); Output->print(enablePinDebug);
+    Output->print(F(",")); Output->print(enableAnalogDebug);
+    Output->print(F(",")); Output->print(enableDevTime);
+    Output->println();
+}
+    
+
+#ifdef TFT_DISPLAY
+void printUnitConfig() {
+    Output->print(F("U")); Output->print(printData.pin);     
+    Output->print(F(",")); Output->print(printData.pulsesPerUnit);  
+    Output->print(F(",")); Output->print(printData.pulsesPerUnitDiv);  
+    Output->print(F(",")); Output->print(printData.unit);
+    Output->print(F(",")); Output->print(printData.flowUnitFactor);  
+    Output->print(F(",")); Output->print(printData.flowUnit);
+    Output->println();
 }
 #endif
 
 
-void showIntervals() {
-    Output->print(F("I"));  Output->print(intervalMin / 1000);
-    Output->print(F(" "));  Output->print(intervalMax / 1000);
-    Output->print(F(" "));  Output->print(intervalSml / 1000);
-    Output->print(F(" "));  Output->println(countMin);
-}
-
-
-void showThresholds() {             // todo: remove this command and show thresholds as part of pin configuration
-    Output->print(F("T"));  //Output->print(analogThresholdMin);
-    Output->print(F(" "));  //Output->print(analogThresholdMax);
-    Output->println();
-}
-
-// todo: add analog parameters here
-void showPinConfig(pinData_t *pd) {
+void printPinConfig(pinData_t *pd) {
     Output->print(F("P"));  Output->print(pd->pinName);
     switch (pd->pulseLevel) {
-        case 1:  Output->print(F(" rising")); break;
-        case 0: Output->print(F(" falling")); break;
-        default: Output->print(F(" -")); break;
+        case 1:  Output->print(F("r")); break;
+        case 0: Output->print(F("f")); break;
+        default: Output->print(F("-")); break;
     }        
     if (pd->pullupFlag) 
-        Output->print(F(" pullup"));
-    Output->print(F(" min "));  Output->print(pd->pulseWidthMin);
+        Output->print(F("p"));
+    Output->print(F(" m"));  Output->print(pd->pulseWidthMin);
     if (pd->analogFlag) {
-        uint8_t analogIndex = findAnalogData(pd);           // reuse or create analog data entry for aPin with oPin
+        uint8_t analogIndex = findAnalogData(pd);           // reuse or create analog entry for aPin with oPin
         if (analogIndex != FF) {
             analogData_t *ad = &analogData[analogIndex];
-            Output->print(F(" analog out-pin "));  Output->print(ad->outPinName);
-            Output->print(F(" thresholds "));  Output->print(ad->thresholdMin);
-            Output->print(F(" / "));  Output->print(ad->thresholdMax);
+            Output->print(F("out"));  Output->print(ad->outPinName);
+            Output->print(F("t"));  Output->print(ad->thresholdMin);
+            Output->print(F("/"));  Output->print(ad->thresholdMax);
         }
     }
 }
 
 
-#ifdef pulseHistory 
-void showPinHistory(pinData_t *pd, uint32_t now) {
+#if defined(TFT_DISPLAY)
+void printTFTFlow(uint32_t timeDiff, uint32_t countDiff) {
+    char fs[10];
+    float flow;
+    if (timeDiff != 0 && printData.pulsesPerUnit != 0 && printData.pulsesPerUnitDiv != 0) {
+        flow = ((float)countDiff * 1000 * printData.flowUnitFactor) 
+                        / (timeDiff * (printData.pulsesPerUnit / printData.pulsesPerUnitDiv));
+    } else {
+        flow = 0;
+    }
+    tft.fillRect(0,64,TFT_HEIGHT, TFT_WIDTH-64, TFT_BLACK);
+    tft.setCursor(0, 64);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    if (flow < 10000 && flow > -1000) {
+        sprintf (fs, "%07.2f", flow);
+        tft.setTextFont(7);
+        tft.setTextSize(1);
+        tft.print(fs);
+        tft.setTextFont(2);
+        tft.setTextSize(1);
+        tft.print(printData.flowUnit);
+    } else {
+        tft.setTextFont(4);
+        tft.setTextSize(1);
+        tft.print(F("flow too big"));
+    }
+}
+#endif
+
+
+void printPinHistory(pinData_t *pd, uint32_t now) {
     histData_t *hd;
-    uint8_t start = (histIndex + 2) % MAX_HIST;
+    uint8_t start = (histIndex + 2) % MAX_HIST;                             // start two after current slot in ring buffer
     uint8_t count = 0;
-    uint32_t last = 0;
-    boolean first = true;
+    uint8_t first = 0;
     uint8_t pinName = pd->pinName;
 
     for (uint8_t i = 0; i < MAX_HIST; i++) {
-        hd = &histData[(start + i) % MAX_HIST];
-        if (hd->pin == pinName)                                                 // are there entries for this pin at all?
-            if (first || (last <= hd->time + hd->len)) count++;
+        hd = &histData[(start + i) % MAX_HIST];                             // entry relative to start in ring
+        if (hd->pin == pinName && ((long int)hd->seq - histLastOut) > 0) {  // are there entries for this pin at all?
+            count++;
+            first = i;
+            break;
+        }
     }
     if (!count) { 
       // Output->println (F("M No Pin History"));            
       return;
-    }
-    
-    Output->print (F("H"));  Output->print(pinName);                           // printed pin number
+    }    
+    Output->print (F("H"));  Output->print(pinName);                        // printed pin number
     Output->print (F(" "));
-    for (uint8_t i = 0; i < MAX_HIST; i++) {
+    for (uint8_t i = first; i < MAX_HIST; i++) {
         hd = &histData[(start + i) % MAX_HIST];
-        if (hd->pin == pinName) {
-            if (first || (last <= hd->time + hd->len)) {
-                if (!first) Output->print (F(", "));
-                Output->print (hd->seq);                                        // sequence
-                Output->print (F("s"));  Output->print ((long) (hd->time-now)); // time when level started
-                Output->print (F("/"));  Output->print (hd->len);               // length 
-                Output->print (F("@"));  Output->print (hd->level);             // level (0/1)
-                Output->print (hd->act);                                        // action
-                first = false;
+        if (hd->pin == pinName && ((long int)hd->seq - histLastOut) > 0) {  // include ignored drops / spikes
+            if (i != first) Output->print (F(", "));
+            Output->print (hd->seq);                                        // sequence
+            Output->print (F(","));  Output->print ((long) (hd->time - now)); // time when level started
+            Output->print (F(":"));  Output->print (hd->len);               // length 
+            Output->print (F("@"));  Output->print (hd->level);             // level (0/1)
+            if (pd->analogFlag) {
+                Output->print (F("/"));  Output->print (hd->aLvl);          // analog level
             }
-            last = hd->time;
+            Output->print (hd->act);                                        // action
+            histLastOut = hd->seq;
         }
     }        
     Output->println();    
 }
-#endif
+
 
 /*
    lastCount and lastRejCount are only modified here (counters at time of last reporting)
    intervalEnd is modified here and in ISR - disable interrupts in critcal moments to avoid garbage in var
    intervalStart is modified only here or for very first Interrupt in ISR
 */
-void showPinCounter(pinData_t *pd, boolean showOnly, uint32_t now) {
+void printPinCounter(pinData_t *pd, boolean showOnly, uint32_t now) {
     uint32_t count, countDiff, realDiff;
     uint32_t startT, endT, timeDiff, widthSum;
     uint16_t rejCount, rejDiff;
@@ -830,290 +1011,354 @@ void showPinCounter(pinData_t *pd, boolean showOnly, uint32_t now) {
         pd->lastCount    = count;               // remember current count for next interval
         pd->lastRejCount = rejCount;
         pd->lastReport   = now;                 // remember when we reported
-#ifdef WifiSupport
+#if defined(WifiSupport)
         delayedTcpReports      = 0;
 #endif
         pd->reportSequence++;
-    }   
-    Output->print(F("R"));  Output->print(pd->pinName);
-    Output->print(F(" C")); Output->print(count);
-    Output->print(F(" D")); Output->print(countDiff);
-    Output->print(F("/"));  Output->print(realDiff);
-    Output->print(F(" T")); Output->print(timeDiff);  
-    Output->print(F(" N")); Output->print(now);
-    Output->print(F(","));  Output->print(millisWraps);    
-    Output->print(F(" X")); Output->print(rejDiff);  
+    } else {
+        Output->print(F("D"));                  // prefix with "D" if showOnly so it is not parsed as report line
+    }
+    Output->print(F("R")); Output->print(pd->pinName);
+    Output->print(F("C")); Output->print(count);
+    Output->print(F("D")); Output->print(countDiff);
+    Output->print(F("/")); Output->print(realDiff);
+    Output->print(F("T")); Output->print(timeDiff);  
+    
+    //Output->print(F("N")); Output->print(now);          // moved to its own line N... dependent on new flag that time should be reported at all
+    //Output->print(F(",")); Output->print(millisWraps);    
+    
+    Output->print(F("X")); Output->print(rejDiff);  
     
     if (!showOnly) {
-        Output->print(F(" S")); Output->print(pd->reportSequence);  
+        Output->print(F("S")); Output->print(pd->reportSequence);  
     }
     if (countDiff > 0) {
-        Output->print(F(" A")); Output->print(widthSum / countDiff);
+        Output->print(F("A")); Output->print(widthSum / countDiff);
     }
     Output->println();    
-#ifdef WifiSupport
-    if (tcpMode && !showOnly) {
+#if defined(WifiSupport)
+    if (enableSerialEcho && tcpMode && !showOnly) {
         Serial.print(F("D reported pin "));  Serial.print(pd->pinName);
         Serial.print(F(" sequence "));       Serial.print(pd->reportSequence);  
         Serial.println(F(" over tcp "));  
     }
 #endif  
 #if defined(TFT_DISPLAY)
-    if (lineCount < 4) {
-        tft.setCursor(0,32+16*lineCount);
-        tft.print(F("R"));  tft.print(pd->pinName);
-        tft.print(F(" C")); tft.print(count);
-        tft.print(F(" D")); tft.print(countDiff);
-        tft.print(F("/"));  tft.print(realDiff);
-        tft.print(F(" T")); tft.print(timeDiff);  
-        tft.print(F(" X")); tft.print(rejDiff);  
-        lineCount++;
+    if (displayMode == 1) {
+        if (lineCount < 4) {
+            tft.setTextFont(2);
+            tft.setTextSize(1);
+            tft.setTextColor(TFT_GREEN, TFT_BLACK);
+            tft.setCursor(0,48+16*lineCount);               // todo: how can this be separated from report? (timing)
+            tft.print(F("R"));  tft.print(pd->pinName);
+            tft.print(F(" C")); tft.print(count);
+            tft.print(F(" D")); tft.print(countDiff);
+            tft.print(F("/"));  tft.print(realDiff);
+            tft.print(F(" T")); tft.print(timeDiff);  
+            tft.print(F(" X")); tft.print(rejDiff);  
+            lineCount++;
+        }
+    } else if (displayMode == 3) {
+        if (pd->pinName == printData.pin) 
+            printTFTFlow(timeDiff, countDiff);
     }
 #endif  
 }
+
+
+#if defined(WifiSupport)
+// called from show and new connectinn
+void printWifiState(Print *Out) {
+    if (WiFi.status() == WL_CONNECTED) {
+        Out->print(F("D Connected to "));   Out->print(WiFi.SSID());    
+        Out->print(F(" with IP "));         Out->print(WiFi.localIP());    
+        Out->print(F(" RSSI "));            Out->print(WiFi.RSSI());
+        Out->println();
+    } else {
+        Out->println(F("D Wifi not connected"));
+    }
+#if defined(TFT_DISPLAY)
+    if (displayMode > 0) {
+        //tft.fillRect(0, 0, TFT_HEIGHT, 31, TFT_BLACK);       // oberen Teil löschen
+        tft.fillScreen(TFT_BLACK);                              // clear Wifi manager output as well
+        tft.setTextFont(2);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.setCursor(0, 0);
+        if (WiFi.status() == WL_CONNECTED) {
+            tft.print(F("Connected to ")); tft.print(WiFi.SSID());
+            tft.setCursor(0, 16);
+            tft.print("IP ");       tft.print(WiFi.localIP());
+            tft.print(F(" RSSI ")); tft.print(WiFi.RSSI());
+        } else {
+            tft.print(F("Wifi not Connected"));
+            tft.setCursor(0, 16);
+            tft.print(F("Retry "));
+            tft.print(reconnects);
+        }
+    }
+#endif
+}
+#endif
 
 
 /* 
    report count and time for pins that are between min and max interval    
 */
 
-boolean reportDue() {
-    uint32_t now = millis();
-    boolean doReport  = false;                          // check if report needs to be called
+bool reportDue(uint32_t now) {
     if((now - lastReportCall) > intervalMin)            // works fine when millis wraps.
-        doReport = true;                                // intervalMin is over 
+        return true;                                    // intervalMin is over 
     else 
         for (uint8_t pinIndex=0; pinIndex < maxPinIndex; pinIndex++)  
             if((now - pinData[pinIndex].lastReport) > intervalMax)
-                doReport = true;                    // active pin has not been reported for langer than intervalMax
-    return doReport;
+                return true;                            // active pin has not been reported for langer than intervalMax
+    return false;
 }
 
 
-
-void report() {
-    uint32_t now = millis();    
-#ifdef WifiSupport
-    if (tcpMode && !Client1Connected && (delayedTcpReports < 3)) {
+bool delayIfDisconnected(uint32_t now) {
+#if defined(WifiSupport)
+    if (tcpMode && !TCPconnected && (delayedTcpReports < 3)) {
         if(delayedTcpReports == 0 || ((now - lastDelayedTcpReports) > 30000)) {
-            Serial.print(F("D report called but tcp is disconnected - delaying ("));
-            Serial.print(delayedTcpReports);
-            Serial.print(F(")"));
-            Serial.print(F(" now "));  Serial.print(now);
-            Serial.print(F(" last ")); Serial.print(lastDelayedTcpReports);
-            Serial.print(F(" diff ")); Serial.print(now - lastDelayedTcpReports);
-
-            Serial.println();
+            if (enableSerialEcho) {
+                Serial.print(F("D report called but tcp is disconnected - delaying ("));
+                Serial.print(delayedTcpReports); Serial.print(F(")"));
+                Serial.print(F(" now "));  Serial.print(now);
+                Serial.print(F(" last ")); Serial.print(lastDelayedTcpReports);
+                Serial.print(F(" diff ")); Serial.print(now - lastDelayedTcpReports);
+                Serial.println();        
+            }
             delayedTcpReports++;
             lastDelayedTcpReports = now;
-            return;
-        } else return;
+            return true;        // continue delaying after message
+        } else 
+            return true;        // another 30 secs not over yet, just continue delaying without message
     }
 #endif    
+    return false;               // not TCP mode -> no delays anyway
+}
+
+
 #if defined(TFT_DISPLAY)
-    tft.setCursor(0,64);
-    lineCount = 0;
+void handleTFTReport(uint32_t now) {
+    lineCount = 0;              // for mode 0 where lines of pin reports are printed
+    if (displayMode == 2 && ((now - lastPrintFlowCall) > 5000)) {
+        lastPrintFlowCall = now;
+
+        uint8_t pinIndex = findInPin(printData.pin); 
+        if (pinIndex == FF)                         // not used so far
+            return;
+        pinData_t *pd = &pinData[pinIndex];         // pinData entry to work with
+
+        uint32_t countDiff = pd->counter - printData.lastCount - pd->counterIgn;      // ignore first pulse after device restart
+        uint32_t timeDiff = pd->intervalEnd - printData.intervalStart;                // time between first and last impulse
+        printData.lastCount = pd->counter;
+        printData.intervalStart = pd->intervalEnd;
+        printTFTFlow(timeDiff, countDiff);
+    }
+}
 #endif
+
+
+void report() {
+    uint32_t now = millis();
+#if defined(TFT_DISPLAY)
+    handleTFTReport(now);
+#endif
+    if (!reportDue(now)) return;
+    if (delayIfDisconnected(now)) return;
     for (uint8_t pinIndex=0; pinIndex < maxPinIndex; pinIndex++) {  // go through all observed pins as pinIndex
         pinData_t *pd = &pinData[pinIndex];
-        showPinCounter (pd, false, now);                            // report pin counters if necessary
-#ifdef pulseHistory
-        if (devVerbose >= 5) 
-            showPinHistory(pd, now);                                // show pin history if verbose >= 5
-#endif          
+        printPinCounter (pd, false, now);                           // report pin counters if necessary
+        if (enableHistory) 
+            printPinHistory(pd, now);                               // show pin history todo: call outside of report
     }
     lastReportCall = now;                                           // check again after intervalMin or if intervalMax is over for a pin
 }
 
 
-void updateEEPROM(int &address, byte value) {
+void updateEEPROM(int &address, char value) {
     if( EEPROM.read(address) != value){
         EEPROM.write(address, value);
     }
     address++;
 }
 
-   
-void updateEEPROMSlot(int &address, char cmd, int v1, int v2, int v3, int v4) {
-    updateEEPROM(address, cmd);         // I / A
-    updateEEPROM(address, v1 & 0xff);       
-    updateEEPROM(address, v1 >> 8);    
-    updateEEPROM(address, v2 & 0xff);
-    updateEEPROM(address, v2 >> 8);
-    updateEEPROM(address, v3 & 0xff);
-    updateEEPROM(address, v3 >> 8);
-    updateEEPROM(address, v4 & 0xff);
-    updateEEPROM(address, v4 >> 8);
+
+void save(int &address, uint16_t n, bool komma=true) {
+    char b[6];
+    sprintf(b, "%u", n);
+    uint8_t len = strlen(b);
+    if (len < 6)
+        for (uint8_t i=0; i<len; i++) 
+            updateEEPROM(address, b[i]);
+    if(komma)
+        updateEEPROM(address, ',');
+}
+
+// store a string as sequence of text coded integers
+void saveStr(int &address, char *s, uint8_t komma=1) {
+    uint8_t cCount = 0;
+    uint8_t byteNum = 0;
+    uint16_t val;
+    bool first = true;
+    while (cCount < MAX_UNIT && *(s+cCount) != 0) {
+        if (byteNum) {
+            val = (*(s+cCount) << 8) + val;         // second char -> add as high byte
+            if (!first) updateEEPROM(address, ',');
+            save(address, val, false);
+            first = false;
+            byteNum = 0;
+        } else {
+            val = *(s+cCount);                      // first char
+            byteNum++;
+        }
+        cCount++;
+    }
+    if (byteNum) {
+        if (!first) updateEEPROM(address, ',');
+        save(address, val, false);
+        if (!val) {
+            updateEEPROM(address, ',');
+            save(address, 0, false);
+        }
+    }
+    if (komma)
+        updateEEPROM(address, ',');
 }
 
 
-void showEEPROM() {
+void CmdSaveToEEPROM() {
+    int a = 0;
+    updateEEPROM(a, 'C');
+    updateEEPROM(a, 'f');
+    updateEEPROM(a, '2');
+    save(a,intervalMin / 1000); save(a,intervalMax / 1000);
+    save(a,intervalSml / 1000); save(a,countMin); 
+    save(a,analogReadInterval); save(a,analogReadSamples,false); 
+    updateEEPROM(a, 'i');
+    
+    save(a,enableHistory); save(a,enableSerialEcho); 
+    save(a,enablePinDebug); save(a,enableAnalogDebug); 
+    save(a,enableDevTime,false); 
+    updateEEPROM(a, 'v');
+
+#if defined TFT_DISPLAY
+    save(a,printData.pin);  
+    save(a,printData.pulsesPerUnit); save(a,printData.pulsesPerUnitDiv); 
+    saveStr(a,printData.unit);           
+    save(a,printData.flowUnitFactor); saveStr(a,printData.flowUnit,false); 
+    updateEEPROM(a, 'u');
+#endif    
+
+    for (uint8_t pinIndex=0; pinIndex < maxPinIndex; pinIndex++) {
+        pinData_t *pd = &pinData[pinIndex];
+        uint8_t analogIndex = findAnalogData(pd);       // find analog entry (if exists)                    
+        if (pd->analogFlag && analogIndex != FF) {
+            analogData_t *ad = &analogData[analogIndex];
+            save(a,pd->pinName);    save(a,pd->pulseLevel ? 3:2);
+            save(a,pd->pullupFlag); save(a,pd->pulseWidthMin);
+            save(a,ad->outPinName); save(a,ad->thresholdMin); save(a,ad->thresholdMax,false);
+            updateEEPROM(a, 'a');
+        } else {
+            save(a,pd->pinName);    save(a,pd->pulseLevel ? 3:2);
+            save(a,pd->pullupFlag); save(a,pd->pulseWidthMin,false);
+            updateEEPROM(a, 'a');
+        }
+    }
+    updateEEPROM(a, 0);
+#if defined(ESP8266) || defined(ESP32)
+    EEPROM.commit();               
+#endif  
+    Output->println(F("D config saved"));
+}
+
+
+void printEEPROM() {
     int address = 0;
-    uint16_t v1, v2, v3, v4;
-    char cmd;
-    if (EEPROM.read(address) != 'C' || EEPROM.read(address+1) != 'f' || EEPROM.read(address+2) != 'g') {
-        Output->println(F("M no config in EEPROM"));
+    char c; 
+    if (EEPROM.read(address) != 'C' || EEPROM.read(address+1) != 'f' || EEPROM.read(address+2) != '2') {
+        Output->println(F("D no config in EEPROM"));
         return;
     }
     address = 3;
-    uint8_t slots = EEPROM.read(address++);
-    if (slots > MAX_PIN + 2) {
-        Output->println(F("M illegal config in EEPROM"));
-        return;
+    Output->print(F("D EEPROM Config: "));
+    while (address < 512 && (c = EEPROM.read(address++)) != 0) {
+        Output->print(c);        
     }
     Output->println();
-    Output->print(F("M EEPROM Config: "));
-    Output->print((char) EEPROM.read(0));
-    Output->print((char) EEPROM.read(1));
-    Output->print((char) EEPROM.read(2));
-    Output->print(F(" Slots: "));
-    Output->print((int) EEPROM.read(3));
-    Output->println();
-    for (uint8_t slot=0; slot < slots; slot++) {
-        cmd = EEPROM.read(address);
-        v1 = EEPROM.read(address+1) + (((uint16_t)EEPROM.read(address+2)) << 8);
-        v2 = EEPROM.read(address+3) + (((uint16_t)EEPROM.read(address+4)) << 8);
-        v3 = EEPROM.read(address+5) + (((uint16_t)EEPROM.read(address+6)) << 8);
-        v4 = EEPROM.read(address+7) + (((uint16_t)EEPROM.read(address+8)) << 8);
-        address = address + 9;
-        Output->print(F("M Slot: "));
-        Output->print(cmd); Output->print(F(" "));
-        Output->print(v1);  Output->print(F(","));
-        Output->print(v2);  Output->print(F(","));
-        Output->print(v3);  Output->print(F(","));
-        Output->print(v4);
-        Output->println();
-    }  
 }
 
 
 void restoreFromEEPROM() {
-    int address = 0;  
-    if (EEPROM.read(address) != 'C' || EEPROM.read(address+1) != 'f' || EEPROM.read(address+2) != 'g') {
-        Serial.println(F("M no config in EEPROM"));
+    int address = 0;
+    char c;
+    if (EEPROM.read(address) != 'C' || EEPROM.read(address+1) != 'f' || EEPROM.read(address+2) != '2') {
+        Output->println(F("M no config in EEPROM"));
         return;
     }
     address = 3;
-    uint8_t slots = EEPROM.read(address++);
-    if (slots > MAX_PIN + 1 || slots < 1) {
-        Serial.println(F("M illegal config in EEPROM"));
-        return;
+    Output->println(F("M restoring config from EEPROM: "));
+    while (address < 512 && (c = EEPROM.read(address++)) != 0) {
+        handleInput(c);
+        Output->print(c);
     }
-    Serial.println(F("M restoring config from EEPROM"));
-    char cmd;
-    for (uint8_t slot=0; slot < slots; slot++) {
-        cmd = EEPROM.read(address);
-        commandLetter = cmd;
-        commandData[0] = EEPROM.read(address+1) + (((uint16_t)EEPROM.read(address+2)) << 8);
-        commandData[1] = EEPROM.read(address+3) + (((uint16_t)EEPROM.read(address+4)) << 8);
-        commandData[2] = EEPROM.read(address+5) + (((uint16_t)EEPROM.read(address+6)) << 8);
-        commandData[3] = EEPROM.read(address+7) + (((uint16_t)EEPROM.read(address+8)) << 8);
-        address = address + 9;
-        commandDataPointer = 4;
-        if (cmd == 'I') CmdInterval();
-        if (cmd == 'T') CmdThreshold();   
-        if (cmd == 'A') CmdAdd();
+    Output->println();
+#if defined(TFT_DISPLAY) 
+    if (displayMode == 1) {
+        tft.setTextFont(2);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.setCursor(0, 32);
+        tft.print(F("Pin config loaded"));
     }
-    commandDataPointer = 0;
-    commandValue = 0;
-    for (uint8_t i=0; i < MAX_INPUT_NUM; i++)
-        commandData[i] = 0;     
-
-#if defined(TFT_DISPLAY) 
-    tft.setCursor(0, 32);
-    tft.print("Pin config loaded");
-#endif
-
-
-}
-
-#if defined(WifiSupport)
-void printConnection(Print *Out) {
-    Out->print(F("M Connected to "));   Out->print(WiFi.SSID());    
-    Out->print(F(" with IP "));         Out->print(WiFi.localIP());    
-    Out->print(F(" RSSI "));            Out->print(WiFi.RSSI());
-    Out->println();
-#if defined(TFT_DISPLAY) 
-    tft.setCursor(0, 0);
-    tft.print(F("Conected to "));       tft.print(WiFi.SSID());
-    tft.print(F("              "));
-    tft.setCursor(0, 16);
-    tft.print("IP ");       tft.print(WiFi.localIP());
-    tft.print(F(" RSSI ")); tft.print(WiFi.RSSI());
 #endif
 }
-#endif
-
-
-/* todo: include analog Pins as well as analog limits in save / restore */
-// idea: store character string in eeprom such that it can be feeded to handleInput
-
-void CmdSaveToEEPROM() {
-    int address   = 0;
-    uint8_t slots = maxPinIndex + 2;
-    updateEEPROM(address, 'C');
-    updateEEPROM(address, 'f');
-    updateEEPROM(address, 'g');
-    updateEEPROM(address, slots);                   // number of defined pins + intervall definition
-    updateEEPROMSlot(address, 'I', (uint16_t)(intervalMin / 1000), (uint16_t)(intervalMax / 1000), 
-                                  (uint16_t)(intervalSml / 1000), (uint16_t)countMin);
-    // updateEEPROMSlot(address, 'T', (uint16_t)analogThresholdMin, (uint16_t)analogThresholdMax, 0, 0);
-    for (uint8_t pinIndex=0; pinIndex < maxPinIndex; pinIndex++) 
-        updateEEPROMSlot(address, 'A', (uint16_t)pinData[pinIndex].pinName, (uint16_t)(pinData[pinIndex].pulseLevel ? 3:2), 
-                                       (uint16_t)pinData[pinIndex].pullupFlag, (uint16_t)pinData[pinIndex].pulseWidthMin);
-#if defined(ESP8266) || defined(ESP32)
-    EEPROM.commit();               
-#endif  
-    Serial.print(F("config saved, "));
-    Serial.print(slots);
-    Serial.print(F(", "));
-    Serial.println(address);
-}
-
 
 
 void CmdInterval() {
-    if (!checkVal(0,1,3600)) return;                    // index 0 is interval min, min 1, max 3600 (1h), std error
-    intervalMin = (uint32_t)commandData[0] * 1000;      // convert to miliseconds
+    if (!checkVal(0,1,3600)) return;                    // index 0 is interval min, min 1, max 3600 (1h)
+    if (!checkVal(1,1,3600)) return;                    // index 1 is interval max, min 1, max 3600 (1h)
+    if (!checkVal(2,0,3600)) return;                    // index 2 is interval small, max 3600 (1h)
+    if (!checkVal(3,0,100))  return;                    // index 3 is count min, max 100
 
-    if (!checkVal(1,1,3600)) return;                    // index 1 is interval max, min 1, max 3600 (1h), std error
-    intervalMax = (uint32_t)commandData[1]* 1000;       // convert to miliseconds
-
-    if (!checkVal(2,0,3600)) return;                    // index 2 is interval small, max 3600 (1h), std error
-    intervalSml = (uint32_t)commandData[2] * 1000;      // convert to miliseconds
-
-    if (!checkVal(3,0,100)) return;                     // index 3 is count min, max 100, std error
-    countMin = commandData[3];
-
-    Output->print(F("M intervals set to ")); Output->print(commandData[0]);
-    Output->print(F(" ")); Output->print(commandData[1]);
-    Output->print(F(" ")); Output->print(commandData[2]);
-    Output->print(F(" ")); Output->println(commandData[3]);
+    intervalMin = commandData[0] * 1000;      // convert to miliseconds
+    intervalMax = commandData[1] * 1000;
+    intervalSml = commandData[2] * 1000;
+    countMin    = commandData[3];
+        
+    if (checkVal(4,0,10000,false)) {                          // index 4 is optional analog read interval
+        analogReadInterval = (int)commandData[4];
+    }
+    if (checkVal(5,1,100,false)) {                      // index 5 is optional analog read samples
+        analogReadSamples = (uint8_t)commandData[5];
+    }
+    printIntervals();
 }
 
 
-// idea: remove t command and add thresholds to add command
-// remove w command and add to interval command
-
+// for backward compatibility - set thresholds for all analog pins at the same time
 void CmdThreshold() {    
-    if (!checkVal(0,1,1023)) return;                            // index 0 is analog threshold min, min 1, max 1023, std error
+    if (!checkVal(0,1,1023)) return;                            // analog threshold min, min 1, max 1023
+    if (!checkVal(1,1,1023)) return;                            // analog threshold max, min 1, max 1023
     for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++)
-        analogData[aIdx].thresholdMin = commandData[0];         // set all threasholds until new command is implemented and threshold is set in add
-
-    if (!checkVal(1,1,1023)) return;                            // index 1 is analog threshold max, min 1, max 1023, std error
+        analogData[aIdx].thresholdMin = commandData[0]; 
     for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++)
-        analogData[aIdx].thresholdMax = commandData[1];         // set all threasholds until new command is implemented and threshold is set in add
+        analogData[aIdx].thresholdMax = commandData[1];
 
-    Output->print(F("M analog thresholds set to ")); Output->print(commandData[0]);
+    Output->print(F("D analog thresholds set to ")); Output->print(commandData[0]);
     Output->print(F(" ")); Output->println(commandData[1]);
 }
+
 
 /*
     handle add command.
 */
 void CmdAdd () {
     uint8_t aPin = commandData[0];              // commandData[0] is pin number
-    if (!checkPin(aPin)                         // is pin allowed?
+    if ( commandData[0] > 255                   // more than one byte?
+         || !checkPin(aPin)                     // is pin allowed?
          || (ledOutPin && aPin == ledOutPin)    // is pin used as led out?
          || findOutPin(aPin) != FF)  {          // is pin used as output so far?
         PrintPinErrorMsg(aPin);
@@ -1139,23 +1384,16 @@ void CmdAdd () {
         commandData[3] = 2;                     // value 3 is min length, optional. Assume default 2 if invalid
     pd->pulseWidthMin = commandData[3];
     
-    // todo: move this to t command, analog conf with max 4 parameters keeps save to eeprom?
-    // t pin out tmin tmax?
-    // or modify save functions, add thresholds to add but allow t command to modify thresholds?
-    // or just have add command to modify thresholds ?
-    
-    if (checkVal(4,1,MAX_APIN, false)) {
-        // 4 - analog out pin number given. This must not be used as input, other output / led
+    if (checkVal(4,1,MAX_APIN, false)) {        // 4 - analog out pin number given
         uint8_t oPin = commandData[4];
         if (!checkPin(oPin) || (ledOutPin && oPin == ledOutPin) || findInPin(oPin) != FF)  {          
             PrintPinErrorMsg(oPin);             // pin alreday used as input or ledout (analog out would be ok)
             return;
         }
-
-        uint8_t analogIndex = findAnalogData(pd);           // reuse or create analog data entry for aPin with oPin
+        uint8_t analogIndex = findAnalogData(pd);           // reuse or create analog entry for aPin with oPin
         if (analogIndex == FF) {
             if (maxAnalogIndex < MAX_ANALOG) {
-                analogIndex = maxAnalogIndex++;             // new entry -> initialize
+                analogIndex = maxAnalogIndex++;             // new entry -> initialize, inc used analog pins 
                 analogData_t *ad = &analogData[analogIndex];
                 ad->thresholdMin = 0;
                 ad->thresholdMax = 0;
@@ -1163,53 +1401,44 @@ void CmdAdd () {
             } else {
                 PrintErrorMsg();
                 Output->println(F("too many analog pins"));
+                return;
             }
         }
-        pd->analogFlag = 1;
+        pd->analogFlag = 1;                                 // set analog flag
         analogData_t *ad = &analogData[analogIndex];
         ad->inPinName = aPin;
         ad->outPinName = oPin;
-    }
+        pinMode (rPin, INPUT);
+        pinMode (pin2GPIO(oPin), OUTPUT);
         
-    pd->pinName = aPin;
-    maxPinIndex++;                              // increment used entries
-    
-    if (!pd->analogFlag) {
-        if (pd->pullupFlag)
-            pinMode (rPin, INPUT_PULLUP);
-        else 
-            pinMode (rPin, INPUT); 
-#if defined(ESP8266) || defined(ESP32)
-        attachInterruptArg(digitalPinToInterrupt(rPin), ESPISR, pd, CHANGE);
-#elif defined(__AVR_ATmega328P__)        
-        AddPinChangeInterrupt(rPin);
-        pinIndexMap[aPin] = pinIndex;
-#endif        
+        if (checkVal(5,1,1023))                             // analog threshold min, min 1, max 1023
+            ad->thresholdMin = commandData[5];
+        if (checkVal(6,1,1023))                             // analog threshold max, min 1, max 1023
+            ad->thresholdMax = commandData[6];
     } else {
-        pinMode (rPin, INPUT);  
+        if (pd->pullupFlag) pinMode (rPin, INPUT_PULLUP);
+        else pinMode (rPin, INPUT); 
+        AddPinChangeInterrupt(pinIndex);
     }
-    Output->print(F("M defined ")); showPinConfig(pd); Output->println();
+    pd->pinName = aPin;
+    if (pinIndex == maxPinIndex) maxPinIndex++;             // increment used entries in pinData
+    Output->print(F("D defined ")); printPinConfig(pd); Output->println();
 }
-// analog thresholds are defined with t command (new: also for individual pins)
-// analog delay and sample number with command w   
 
 
 /*
-    handle rem command.
+    handle remove command.
 */
 void CmdRemove() {
     uint8_t aPin = commandData[0];              // commandData[0] is pin number
     uint8_t pinIndex = findInPin(aPin);
-    if (pinIndex == FF) return;                 // pin is currently not used as input
+    if (commandData[0] > 255                    // too big
+         || pinIndex == FF)                     // pin is currently not used as input
+         return;                                
     pinData_t *pd = &pinData[pinIndex];         // config entry to work with
 
     if (!pd->analogFlag) {                      
-#if defined(ESP8266) || defined(ESP32)
-        detachInterrupt(digitalPinToInterrupt(pin2GPIO(aPin)));
-#elif defined(__AVR_ATmega328P__)
-        RemovePinChangeInterrupt(rPin);
-        pinIndexMap[aPin] = FF;
-#endif
+        RemovePinChangeInterrupt(pinIndex);
     } else {
         // find analog data entry
         uint8_t analogIndex = FF;
@@ -1231,42 +1460,78 @@ void CmdRemove() {
         }
     }
     
-    for (uint8_t rIdx = pinIndex; (rIdx + 1) < maxPinIndex; rIdx++)
-        pinData[rIdx] = pinData[rIdx + 1];
-    pinData_t *lastPd = &pinData[--maxPinIndex];
-    initPinVars(lastPd, 0);
-    
-    Output->print(F("M removed ")); Output->println(aPin);
+    for (uint8_t rIdx = pinIndex; (rIdx + 1) < maxPinIndex; rIdx++) {
+        if (!pinData[rIdx].analogFlag) {
+            RemovePinChangeInterrupt(rIdx+1);
+        }
+        pinData[rIdx] = pinData[rIdx + 1];                              // move pinData entries after pinIndex up
+        if (!pinData[rIdx].analogFlag) {
+            AddPinChangeInterrupt(rIdx);
+        }
+        
+        if (pd->analogFlag) { 
+            for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {                    
+                if (analogData[aIdx].inPinData == &pinData[rIdx + 1]) 
+                    analogData[aIdx].inPinData = &pinData[rIdx];
+            }
+        }
+    }
+    pinData_t *lastPd = &pinData[--maxPinIndex];                        // clear the last one that is now no longer needed
+    initPinVars(lastPd, 0);    
+    Output->print(F("D removed ")); Output->println(aPin);
+}
 
+
+void CmdClear () {
+    uint8_t aPin = commandData[0];              // commandData[0] is pin number
+    uint8_t pinIndex = findInPin(aPin);         // is pin in use?
+    if (commandData[0] > 255                    // too big
+         || pinIndex == FF) {                   // not found
+        PrintPinErrorMsg(aPin);                 // no active pin
+        return;
+    }
+    pinData_t *pd = &pinData[pinIndex];
+
+    uint32_t now = millis();  
+    pd->lastReport     = now;
+    pd->lastCount      = 0;
+    pd->lastRejCount   = 0;
+    
+    noInterrupts();
+    pd->intervalStart  = pd->intervalEnd;       // time of last pulse is now time of first pulse in this new interval
+    pd->counter        = 0;                     // counters to 0
+    pd->counterIgn     = 0;
+    pd->rejectCounter  = 0;        
+    pd->pulseWidthSum  = 0;
+    interrupts();
+    Output->print(F("M cleared ")); Output->println(aPin);
 }
 
 
 /* give status report in between if requested over serial input */
 void CmdShow() {
     uint32_t now = millis();  
-    Output->print(F("M Status: ")); printVersionMsg();
+    Output->println();
+    Output->print(F("D Status: ")); printVersionMsg();
     Output->println();
     
 #if defined(WifiSupport)
-    printConnection(Output);
+    printWifiState(Output);                            // print line with IP and RSSI
 #endif    
-
-    showIntervals();    
-    showThresholds();
-
-    Output->print(F("V")); Output->println(devVerbose);
+    printIntervals();
+    printVerboseFlags();
+#if defined(TFT_DISPLAY)
+    printUnitConfig();
+#endif
     
     for (uint8_t pinIndex=0; pinIndex < maxPinIndex; pinIndex++) {
         pinData_t *pd = &pinData[pinIndex];
-        showPinConfig(pd);
+        printPinConfig(pd);
         Output->print(F(", "));
-        showPinCounter(pd, true, now);
-#ifdef pulseHistory             
-        showPinHistory(pd, now);
-#endif          
+        printPinCounter(pd, true, now);
     }
-    showEEPROM();
-    Output->print(F("M Next report in "));
+    printEEPROM();
+    Output->print(F("D Next report in "));              // Fhem side recognizes this as end of show command
     Output->print(lastReportCall + intervalMin - millis());
     Output->println(F(" milliseconds"));
 }
@@ -1274,34 +1539,15 @@ void CmdShow() {
 
 void CmdHello() {
     uint32_t now = millis();
-    Output->println();
-    printVersionMsg();
-    Output->print(F(" Hello, pins "));
-    boolean first = true;
-    for (uint8_t aPin=0; aPin < MAX_APIN; aPin++) {
-        if (pin2GPIO(aPin) != FF) {
-            if (!first) {
-                Output->print(F(","));
-            } else {
-                first = false;
-            }
-            Output->print(aPin);            // show available pins
-        }
-    }
-    Output->print(F(" available"));
-    Output->print(F(" T")); Output->print(now);
-    Output->print(F(","));  Output->print(millisWraps);
-    Output->print(F(" B")); Output->print(bootTime);
-    Output->print(F(","));  Output->print(bootWraps);
-    
-    Output->println();
-    showIntervals();
-    showThresholds();
-    Output->print(F("V"));
-    Output->println(devVerbose);
+    Output->println(); 
+    printVersionMsg(); Output->println(F(" Hello"));
+    printTime(now);                  // print line with device time,                 e.g. N456,2 B789,3
+    printAvailablePins();            // print line with available pins,              e.g. C2,3,4 ...
+    printIntervals();                // print line with configured intervals,        e.g. I30,60,2,2 ...
+    printVerboseFlags();             // print line with configured verbose flags,    e.g. V0,1,...
     
     for (uint8_t pinIndex=0; pinIndex < maxPinIndex; pinIndex++) { // go through all observed pins as pinIndex
-        showPinConfig(&pinData[pinIndex]);
+        printPinConfig(&pinData[pinIndex]);
         Output->println();
     }
 }
@@ -1311,54 +1557,93 @@ void CmdLED() {
     // set monitor ouput LED and a max of 5 pins to monitor
     // 12,2,3l would set pin 12 as LED and pins 2 and 3 to create LED switches when their level changes
     // dont allow 0, check if already used as led, if not checkPin
-    uint8_t aPin = commandData[0];                   // commandData[0] is lec pin number
+    uint8_t aPin = commandData[0];                   // commandData[0] is led pin number
     
-    if (!aPin || !checkPin(aPin) || findOutPin(aPin) != FF || findInPin(aPin) != FF) {
+    if (commandData[0] > 255 || !aPin || !checkPin(aPin) 
+         || findOutPin(aPin) != FF || findInPin(aPin) != FF) {
         PrintPinErrorMsg(aPin);                 // illegal pin or already used for in/other output
         return;
     }
-    
     // save pin and validate other params / pins to monitor
 }
 
 
-// interval to i command, samples to add command ?
-// need new fhem module anyway so commands can be rearranged.
-// new module will then require this new sketch
-
-void CmdWait() {
-    if (!checkVal(0,0,10000)) return;
-    analogReadInterval = (int)commandData[0];
-
-    if (!checkVal(1,1,100,false)) return;
-    //analogReadSamples = (uint8_t)commandData[1];
+uint8_t stuffString(char* str, uint8_t offset) {
+    uint8_t sIndex = 0;
+    uint8_t byteVal;
+    uint8_t cIndex; 
+    for (cIndex = offset; (cIndex < MAX_INPUT_NUM) && (sIndex < MAX_UNIT-1); cIndex++) {
+        uint16_t value = commandData[cIndex];
+        for (uint8_t byteNum = 0; (byteNum < 2) && (sIndex < MAX_UNIT-1); byteNum++) {
+            byteVal = value & 0xFF;
+            if (!byteVal) break;
+            value = value >> 8;
+            str[sIndex++] = byteVal;
+        }
+        if (!byteVal) break;
+    }
+    str[sIndex] = 0;
+    return cIndex + 1;
 }
 
 
-// combine devverbose and debug and make it multi param for diffeent things ..
+void CmdUnits() {
+#if defined(TFT_DISPLAY)
+    // set pulses per unit for a pin and a unit for printing consumption per minute / per hour
+    uint8_t next = 1;
+    uint8_t aPin = commandData[0];                          // commandData[0] is pin number to display
+    if (commandData[0] > 255 
+         || !aPin || !checkPin(aPin)) {                     // is pin allowed?
+        PrintPinErrorMsg(aPin);
+        return;
+    }
+    printData.pin = aPin;
+
+    if (!checkVal(next,1))  return;                         // index 1 is pulsesPerUnit
+    printData.pulsesPerUnit = commandData[next++];
+
+    if (!checkVal(next,1))  return;                         // index 2 is pulsesPerUnitDiv
+    printData.pulsesPerUnitDiv = commandData[next++];
+
+    next = stuffString(printData.unit, next);               // unit string starting at commandData[3]
+
+    if (!checkVal(next,1))  return;                         // index after first strng is flowUnitFactor
+    printData.flowUnitFactor = commandData[next++];
+
+    next = stuffString(printData.flowUnit, next);           // unit string starting at commandData[2]
+    printUnitConfig();
+#endif    
+}
 
 
 void CmdDevVerbose() {    
-    if (!checkVal(0,0,50)) return;                // index 0 is devVerbose level, max 50, std error
-    devVerbose = commandData[0];
-    Output->print(F("M devVerbose set to ")); Output->println(commandData[0]); 
+    if (!checkVal(0,0,1))  return;                  // index 0 is enableHistory
+    if (!checkVal(1,0,10)) return;                  // index 1 is enableSerialEcho
+    if (!checkVal(2,0,1))  return;                  // index 2 is enablePinDebug
+    if (!checkVal(3,0,10)) return;                  // index 3 is enableAnalogDebug
+    if (!checkVal(4,0,1))  return;                  // index 3 is enableDevTime
+
+    enableHistory     = (uint8_t)commandData[0];
+    enableSerialEcho  = (uint8_t)commandData[1];
+    enablePinDebug    = (uint8_t)commandData[2];
+    enableAnalogDebug = (uint8_t)commandData[3];
+    enableDevTime     = (uint8_t)commandData[4];
+    printVerboseFlags();
 }
             
             
 void CmdKeepAlive() {
     if (commandData[0] == 1 && commandDataSize > 0) {
-        Output->print(F("alive"));
-#ifdef WifiSupport
+        Output->print(F("A"));
+#if defined(WifiSupport)
         uint32_t now = millis();
-        if (devVerbose >=5) {
-            Output->print(F(" RSSI ")); Output->print(WiFi.RSSI());
-        }
+        Output->print(F("R")); Output->print(WiFi.RSSI());
         if (commandData[0] == 1 && commandDataSize > 0 && commandDataSize < 3 && Client1.connected()) {
             tcpMode = true;
             if (commandDataSize == 2) {
                 keepAliveTimeout = commandData[1];  // timeout in seconds (on ESP side we use it times 3)
             } else {
-                keepAliveTimeout = 200;             // *3*1000 gives 10 minutes if nothing sent (should not happen)
+                keepAliveTimeout = 200;             // *3 gives 10 minutes if nothing sent (should not happen)
             }
         }  
         lastKeepAlive = now;
@@ -1367,19 +1652,35 @@ void CmdKeepAlive() {
     }
 }
 
-
  
 void CmdQuit() {
-#ifdef WifiSupport
+#if defined(WifiSupport)
     if (Client1.connected()) {
         Client1.println(F("closing connection"));
         Client1.stop();
         tcpMode =  false;
-        Serial.println(F("M TCP connection closed"));
+        if (enableSerialEcho) 
+            Serial.println(F("D TCP connection closed after Q command"));
         return;
     } 
 #endif
-    Serial.println(F("M TCP not connected"));
+    Serial.println(F("D TCP not connected"));
+}
+
+
+void CmdRestart() {
+#if defined(ESP8266) || defined(ESP32)
+    ESP.restart();
+#endif
+    // beim uno / nano ohne wlan einfach nur die Variablen zurücksetzen.
+    initialize();
+}
+
+
+void CmdWifiReset() {
+#if defined(WifiSupport)
+    wifiManager.resetSettings();
+#endif
 }
 
 
@@ -1401,7 +1702,7 @@ void handleInput(char c) {
             commandData[commandDataPointer] = commandValue;    
         }
     
-        if (devVerbose > 0) {
+        if (enableSerialEcho > 1) {
             Serial.print(F("D got "));
             for (short v = 0; v <= commandDataPointer; v++) {          
                 if (v > 0) Serial.print(F(","));
@@ -1414,36 +1715,37 @@ void handleInput(char c) {
         switch (c) {
         case 'a':                       // add a pin
             CmdAdd(); break;
+        case 'c':
+            CmdClear(); break;          // clear a counter for pin specifid
         case 'd':                       // delete a pin
             CmdRemove(); break;
         case 'e':                       // save to EEPROM
             CmdSaveToEEPROM(); break; 
-        case 'f':                       // flash ota
-            break; 
+
         case 'h':                       // hello
             CmdHello(); break;
         case 'i':                       // interval
             CmdInterval(); break;
         case 'k':                       // keep alive
             CmdKeepAlive(); break;   
-        case 'l'    :                       // keep alive
+        case 'l'    :                   // led feedback
             CmdLED(); break;   
-            
-        // o / p should be ?
-         
+
         case 'q':                       // quit
             CmdQuit(); break; 
-        case 'r':                       // reset - todo: maybe do real device reset here?
-            initialize(); break;
+        case 'r':                       // reset / restart
+            CmdRestart(); break;
         case 's':                       // show
             CmdShow(); break;
+        case 't':                       // thresholds for analog pins (legacy - moved to a)
+            CmdThreshold(); break;
+        case 'u':                       // pulses per unit for local output
+            CmdUnits(); break;
         case 'v':                       // dev verbose
             CmdDevVerbose(); break;
+        case 'w':                       // reset wifi settings
+            CmdWifiReset(); break;
 
-        case 't':                       // thresholds for analog pins (one or all)
-            CmdThreshold(); break;
-        case 'w':                       // wait - delay between analog reads and other analog read parameters
-            CmdWait(); break;
         default:
             break;
         }
@@ -1453,31 +1755,21 @@ void handleInput(char c) {
 }
 
 
-#ifdef debugPins
-void debugPinChanges() {
+void debugDigitalPinChanges() {
     for (uint8_t pinIndex=0; pinIndex < maxPinIndex; pinIndex++) {
         pinData_t *pd = &pinData[pinIndex];        
-        uint8_t pinState = digitalRead(pin2GPIO(pd->pinName));
-                    
-        if (pinState != pd->lastDebugLevel) {
-            pd->lastDebugLevel = pinState;
-            Output->print(F("M pin "));       Output->print(pd->pinName);
-            Output->print(F(" changed to ")); Output->print(pinState);
-#ifdef pulseHistory                     
-            Output->print(F(", histIdx "));   Output->print(histIndex);
-#endif                  
-            Output->print(F(", count "));     Output->print(pd->counter);
-            Output->print(F(", reject "));    Output->print(pd->rejectCounter);
-            Output->println();
-        }
+        if (!pd->analogFlag) {
+            uint8_t pinState = digitalRead(pin2GPIO(pd->pinName));
+            if (pinState != pd->lastDebugLevel)
+                printPinChangeDebug(pd, pinState);
+        }   
     }
 }
-#endif
 
 
-#ifdef WifiSupport    
-void showWifiStatus() {
-    Serial.print(F("M Status is "));
+#if defined(WifiSupport)   
+void printWifiStatus() {
+    Serial.print(F("D Wifi Status is "));
     switch (WiFi.status()) {
         case WL_CONNECT_FAILED: 
         Serial.println(F("Connect Failed")); break;
@@ -1499,19 +1791,23 @@ void configModeCallback (WiFiManager *myWiFiManager) {
     Serial.println(WiFi.softAPIP());
     //if you used auto generated SSID, print it
     Serial.println(myWiFiManager->getConfigPortalSSID());
-#if defined(TFT_DISPLAY)    
-    tft.setCursor(0,0);
+#if defined(TFT_DISPLAY)
+    tft.fillScreen(TFT_BLUE);
+    tft.setTextFont(4);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_YELLOW , TFT_BLUE);
+    tft.setCursor(0,32);    // x, y,   TFT_HEIGHT=240, TFT_WIDTH=135
+
     tft.print(F("Entered config mode      "));
-    tft.setCursor(0, 16);
+    tft.setCursor(0, 100);
     tft.print(myWiFiManager->getConfigPortalSSID());
 #endif
 }
 #endif
 
 
-void connectWiFi() {
-    Client1Connected = false;
-    Client2Connected = false;
+void initWifi() {
+    TCPconnected = false;
     WiFi.mode(WIFI_STA);
     WiFi.setAutoConnect(true);
     WiFi.setAutoReconnect(true);
@@ -1519,14 +1815,17 @@ void connectWiFi() {
     if (WiFi.status() != WL_CONNECTED) {
 #if defined(STATIC_WIFI)
 #if defined(TFT_DISPLAY) 
+        tft.setTextFont(2);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
         tft.setCursor(0,0);
         tft.print(F("Conecting WiFi to ")); tft.print(ssid);
 #endif
         uint8_t counter = 0;
-        Serial.print(F("M Connecting WiFi to ")); Serial.println(ssid);
+        Serial.print(F("D Connecting WiFi to ")); Serial.println(ssid);
         WiFi.begin(ssid, password);                 // connect with compiled strings
         while (WiFi.status() != WL_CONNECTED) {
-            showWifiStatus();
+            printWifiStatus();
             delay(1000);
             counter++;
             if (counter > 2) {
@@ -1534,7 +1833,7 @@ void connectWiFi() {
                 tft.setCursor(0,0);
                 tft.print(F("Retry conecting WiFi to")); tft.print(ssid);
 #endif
-                Serial.println(F("M Retry connecting WiFi"));
+                Serial.println(F("D Retry connecting WiFi"));
                 WiFi.begin(ssid, password);         // restart connecting
                 delay (1000);
                 counter = 0;                        // do forever until connected with retries
@@ -1545,29 +1844,24 @@ void connectWiFi() {
         tft.setCursor(0,0);
         tft.print(F("try reconecting WiFi"));
 #endif
-        Serial.println(F("M Try reconnecting WiFi"));
+        Serial.println(F("D Try reconnecting WiFi"));
         WiFi.begin();             
         delay(1000);
-        showWifiStatus();
+        printWifiStatus();
         if (WiFi.status() != WL_CONNECTED) {
 #if defined(TFT_DISPLAY)    
             tft.setCursor(0,0);
             tft.print(F("Retry reconecting WiFi"));
 #endif
-            Serial.println(F("M Retry reconnecting WiFi"));
+            Serial.println(F("D Retry reconnecting WiFi"));
             WiFi.begin();         
             delay (1000);
-        }    
-        WiFiManager wifiManager;
-        //wifiManager.resetSettings();                // for testing
-
+        }            
+        wifiManager.setConfigPortalBlocking(false);
         wifiManager.setAPCallback(configModeCallback);  //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
         wifiManager.autoConnect();
 #endif
     }
-    printConnection (&Serial);
-    Server.begin();                     // Start the TCP server
-    Serial.println(F("M Server started"));
 }
 
 
@@ -1575,40 +1869,75 @@ void handleConnections() {
     IPAddress remote;   
     uint32_t now = millis();
     
-    if (Client1Connected) {
-        if((now - lastKeepAlive) > (keepAliveTimeout * 3000)) {
-            Serial.println(F("M no keepalive from Client - disconnecting"));
-            Client1.stop();
+    if (WiFi.status() == WL_CONNECTED && !serverStarted) {      // first call after connected
+        printWifiState (&Serial);
+        Server.begin();                                         // Start the TCP server
+        Serial.println(F("D TCP Server started"));
+        serverStarted = true;                                   // remember we did this already
+    } 
+    if (WiFi.status() != WL_CONNECTED) {                        // WiFi lost
+        if (serverStarted) {                                    // first time we notice ...
+            printWifiState (&Serial);                          // show that we lost Wifi
+            Server.close();                                     // Stop  the TCP server
+            serverStarted = false;                              // so printWifiState will be called after reconnect
+            Serial.println(F("D Wifi lost - TCP Server stopped"));
+            lastReconnectTry = now;                             // don't try to manually reconnect right now - Framework should do it
         }
-    }    
-    if (Client1.available()) {
-        handleInput(Client1.read());
-        //Serial.println(F("M new Input over TCP"));
+        if ((now - lastReconnectTry) > 5000) {
+            printWifiState (&Serial);                          // show that we lost Wifi
+            Serial.println(F("D Try reconnecting WiFi"));
+            WiFi.begin();                                       // try to force reconnect (framework seems to not do it sometimes...)
+            lastReconnectTry = now;
+            reconnects++;
+        }
     }
+
     if (Client1.connected()) {
-        Client2 = Server.available();
+        if (Client1.available()) {
+            handleInput(Client1.read());                        // input from TCP
+            //Serial.println(F("D new Input over TCP"));
+        }
+        now = millis();                                         // get millis again to avoid keepalive timeout directly after first k command
+        if((now - lastKeepAlive) > (keepAliveTimeout*3000)) {   // check keepAlive timout (* 3 secs)
+            Serial.println(F("D no keepalive - close"));
+            Output->println(F("D no keepalive - close"));   
+            //Output->print(F("D timeout was "));
+            //Output->print(keepAliveTimeout);
+            //Output->print(F(" last at "));
+            //Output->print(lastKeepAlive);
+            //Output->print(F(" now "));
+            //Output->print(now);
+            Output->println();
+            Client1.stop();                                     // close connection due to keepalive timeout 
+        }
+        Client2 = Server.available();                           // refuse further connect attempts
         if (Client2) {
             remote = Client2.remoteIP();
-            Client2.println(F("connection already busy"));
+            Client2.println(F("conn busy"));
             Client2.stop();
-            Serial.print(F("M second connection from ")); Serial.print(remote);
-            Serial.println(F(" rejected"));
+            if (enableSerialEcho) {
+                Serial.print(F("D 2nd conn from ")); Serial.print(remote);
+                Serial.println(F(" rejected"));
+            }
         }
-    } else {
-        if (Client1Connected) {                                 // client used to be connected, now disconnected
-            Client1Connected = false;
+    } else {    // no client connected right now
+        if (TCPconnected) {                                 // client used to be connected, now disconnected
+            TCPconnected = false;
             Output = &Serial;
-            Serial.println(F("M connection to client lost"));
+            if (enableSerialEcho)
+                Serial.println(F("D conn lost"));           // report disconnect via serial
         }
         Client1 = Server.available();
-        if (Client1) {                                          // accepting new connection
+        if (Client1) {                                      // accepting new connection
             remote = Client1.remoteIP();
-            Serial.print(F("M new connection from ")); Serial.print(remote);
-            Serial.println(F(" accepted"));
-            Client1Connected = true;
+            if (enableSerialEcho) {
+                Serial.print(F("D new conn from ")); Serial.print(remote);
+                Serial.println(F(" accepted"));
+            }
+            TCPconnected = true;                            // remember connection in case we loose it
             Output = &Client1;
             lastKeepAlive = now;
-            CmdHello();                                         // say hello to client
+            CmdHello();                                     // say hello to client
         }
     }
 } 
@@ -1619,81 +1948,97 @@ void handleTime() {
     uint32_t now = millis();
     if (now < lastMillis) millisWraps++;
     lastMillis = now;
+
+    if (enableDevTime) 
+        if ((long int)now - lastTimeMillis > (int32_t)60 * 60 * 1000) {     // every 60 minutes
+            printTime(now);
+            lastTimeMillis = now;
+        }
 }
 
 
-void detectTrigger(analogData_t *ad, int val) {
-    uint8_t nextState = ad->triggerState;       // set next trigger level to be the same as the old one 
+void detectTrigger(analogData_t *ad, unsigned int val) {
+    uint32_t average;
+    uint8_t nextState = ad->triggerState;           // initialize next trigger level to be the same as the old one 
     if (val > ad->thresholdMax) {
-        nextState = 1;                          // if above upper threshold then 1
+        nextState = 1;                              // if above upper threshold then change to 1
     } else if (val < ad->thresholdMin) {
-        nextState = 0;                          // if below lower threshold then 0
-    }                                           // otherwise it stays as old level
-    ad->triggerState = nextState;               // save new level
-    
-    if (ledOutPin)
-        digitalWrite(ledOutPin, ad->triggerState);
-
-    doCount (ad->inPinData, ad->triggerState);  // do the counting, history and so on
-    
-#ifdef debugPins
-    if (devVerbose >= 10) {
-        Output->print(F("M pin "));      Output->print(ad->inPinName);
-        Output->print(F(" ) "));
-        Output->print(F(" to "));        Output->print(nextState);
-#ifdef pulseHistory                     
-        Output->print(F("  histIdx "));  Output->print(histIndex);
-#endif                  
-        Output->print(F("  count "));    Output->print(ad->inPinData->counter);
-        Output->print(F("  reject "));   Output->print(ad->inPinData->rejectCounter);
-        Output->println();
+        nextState = 0;                              // if below lower threshold then change to 0
     }
-#endif
+    if (ad->avgCnt <= 65000) {
+        ad->avgSum += val;
+        ad->avgCnt++;
+    }
+    if (nextState != ad->triggerState) {            // if level has changed
+        average = ad->avgSum / ad->avgCnt;
+        if (average > 4000) average = 4000;
+        doCount (ad->inPinData, nextState, (uint16_t) average);
+        ad->avgSum = 0;
+        ad->avgCnt = 0;
+        if (enablePinDebug)
+            printPinChangeDebug(ad->inPinData, nextState);
+    }
+    ad->triggerState = nextState;                   // save new level
 }
 
 
 void readAnalog() {
     uint32_t now = millis();
-    uint16_t interval2 = analogReadInterval + 2;            // last read + interval + 2ms -> read off value (state 2)
-    uint16_t interval3 = analogReadInterval + 8;            // last read + interval + 4ms -> read on value (state 5)
+    char line[26];
+    uint16_t waitForOff = 0; 
+    uint16_t waitForOn = 1;
+
+    //if (analogCallLast && (now - analogCallLast) > 5) {
+    //    Output->print(F("D readAnalog call delay "));
+    //    Output->println(now - analogCallLast);
+    //}
+    analogCallLast = now;
+
     if ((now - analogReadLast) > analogReadInterval) {      // time for next analog read?
-        Serial.print(F("AR")); Serial.print(analogReadState); Serial.print(F(" ")); 
         switch (analogReadState) {
             case 0:                                                 // initial state
                 for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {                    
                     analogData_t *ad = &analogData[aIdx];
-                    Serial.print(F("ap")); Serial.print(ad->outPinName); Serial.print(F(" ")); 
-                    digitalWrite(pin2GPIO(ad->outPinName) , HIGH);   // make sure IR LED is off for first read
+                    digitalWrite(pin2GPIO(ad->outPinName) , LOW);   // make sure IR LED is off for first read
                     analogReadCount = 0;                            // initialize sums and counter
-                    Serial.print(F("gpio ")); Serial.print(pin2GPIO(ad->outPinName)); Serial.print(F(" off ")); 
-                    Serial.println();
                     ad->sumOff = 0; ad->sumOn = 0;
                 }
                 analogReadState = 1;
+                analogReadWait = millis();
                 break;
             case 1:                                                 // wait before measuring
-                if ((now - analogReadLast) < interval2)
+                if ((now - analogReadWait) < waitForOff)            // todo: wait in microseconds with micros() function, make witForOff configurable
                     return;
                 analogReadState = 2;
                 break;
             case 2:
                 for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {
                     analogData_t *ad = &analogData[aIdx];
-                    ad->sumOff += analogRead(pin2GPIO(ad->inPinName));  // read the analog in value (off)
+                    uint16_t sample = analogRead(pin2GPIO(ad->inPinName));   // read the analog in value (off)
+                    ad->sumOff += sample;
+
+                    if (enableAnalogDebug > 2) {
+                        Output->print(F("M "));
+                        Output->print(millis());
+                        Output->print(F(", 0, "));
+                        Output->print(sample);
+                        Output->print(F(", "));
+                        Output->print(analogReadCount);
+                        Output->println();
+                    }
                 }
                 if (++analogReadCount < analogReadSamples)
                     break;
                 for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {
                     analogData_t *ad = &analogData[aIdx];
                     digitalWrite(pin2GPIO(ad->outPinName), HIGH);      // turn IR LED on
-                    Serial.print(F("gpio ")); Serial.print(pin2GPIO(ad->outPinName)); Serial.print(F(" on ")); 
-                    Serial.println();
                 }
                 analogReadCount = 0;
                 analogReadState = 4;
+                analogReadWait = millis();
                 break;
             case 4:                                                 // wait again before measuring
-                if ((now - analogReadLast) < interval3)
+                if ((now - analogReadWait) < waitForOn)
                     return;
                 analogReadState = 5;
                 break;
@@ -1701,7 +2046,18 @@ void readAnalog() {
                 int sensorDiff;
                 for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {
                     analogData_t *ad = &analogData[aIdx];
-                    ad->sumOn += analogRead(pin2GPIO(ad->inPinName));   // read the analog in value (on)
+                    uint16_t sample = analogRead(pin2GPIO(ad->inPinName));   // read the analog in value (on)
+                    ad->sumOn += sample;
+                    if (enableAnalogDebug > 2) {
+                        Output->print(F("M "));
+                        Output->print(millis());
+                        Output->print(F(", 1, "));
+                        Output->print(sample);
+                        Output->print(F(", "));
+                        Output->print(analogReadCount);
+                        Output->println();
+                    }
+
                 }
                 if (++analogReadCount < analogReadSamples) 
                     break;
@@ -1713,19 +2069,20 @@ void readAnalog() {
                     if (sensorDiff < 0) sensorDiff = 0;
                     if (sensorDiff > 4096) sensorDiff = 4096;
                     detectTrigger (ad, sensorDiff);                    // calculate level with triggers
-                    if (devVerbose >= 25) {
-                        char line[26];
+                    if (enableAnalogDebug > 1) {
                         sprintf(line, "L%2d: %4d, %4d -> % 4d", ad->inPinName, 
                             ad->sumOn / analogReadSamples, ad->sumOff / analogReadSamples, sensorDiff);
                         Output->println(line);
-                    } else if (devVerbose >= 20) {
-                        Output->print(F("L%2d: "));
-                        Output->println(sensorDiff);
+                    } else if (enableAnalogDebug) {
+                        sprintf(line, "L%2d: % 4d", ad->inPinName, sensorDiff);
+                        Output->println(line);
                     }                    
 #if defined(TFT_DISPLAY)
-                    int len = sensorDiff * analogReadAmp * TFT_HEIGHT / 4096;
-                    tft.fillRect(0,TFT_WIDTH-10-(10*aIdx),len,10, TFT_YELLOW);
-                    tft.fillRect(len,TFT_WIDTH-10-(10*aIdx),TFT_HEIGHT-len,10, TFT_BLACK);
+                    if (displayMode == 1) {                    
+                        int len = sensorDiff * analogReadAmp * TFT_HEIGHT / 4096;
+                        tft.fillRect(0,TFT_WIDTH-10-(10*aIdx),len,10, TFT_YELLOW);
+                        tft.fillRect(len,TFT_WIDTH-10-(10*aIdx),TFT_HEIGHT-len,10, TFT_BLACK);
+                    }
 #endif
                 }
                 analogReadState = 0;
@@ -1733,21 +2090,73 @@ void readAnalog() {
                 break;
             default:
                 analogReadState = 0;
-                Output->println(F("D error: wrong analog read state"));
+                Output->println(F("Error: wrong analog read state"));
                 break;
         }
     }
 }
 
+#if defined (TFT_DISPLAY)
+/*
+void ButtonHandlerChanged(Button2& btn) {
+    Serial.println("changed");
+}
+*/
 
-void setup() {
-#ifdef TFT_DISPLAY    
-    tft.init();
-    tft.fillScreen(TFT_BLACK);
-    tft.setRotation(1);
+
+void ButtonHandlerTap(Button2& btn) {
+    displayMode++;
+    if (displayMode > displayModeMax) displayMode = 0;
     tft.setTextFont(2);
     tft.setTextSize(1);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.fillRect(0, 32, TFT_HEIGHT, TFT_WIDTH-32, TFT_BLACK);       // unteren Teil löschen
+    //tft.fillScreen(TFT_BLUE);
+    // test             240 (lange Seite) 135 (kurze)
+    //tft.fillRect(0, 32, TFT_HEIGHT-1, TFT_WIDTH-32-1, TFT_BLACK);  // lässt einen 1-Pixel blauen Rand
+    tft.setCursor(TFT_HEIGHT-20, TFT_WIDTH-25);    // x, y,   TFT_HEIGHT=240, TFT_WIDTH=135
+    tft.print(displayMode);
+    /*
+    Serial.print(F("D displayMode "));
+    Serial.println(displayMode);
+    */
+    if (displayMode == 2) {
+        tft.setCursor(0, 32);
+        tft.setTextFont(4);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.print(F("consumption 5s"));
+    } else if (displayMode == 3) {
+        tft.setCursor(0, 32);
+        tft.setTextFont(4);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.print(F("consumption dyn"));
+    }
+}
+#endif
+
+
+void setup() {
+#if defined (TFT_DISPLAY)
+    tft.init();
+    tft.fillScreen(TFT_BLACK);
+    tft.setRotation(1);             // 1=Querformat (0 wäre Hochformat, TFT_Width / TFT_Height beziehen sich offenbar auf Hochformat)
+    tft.setTextFont(2);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+
+    //buttonA.setChangedHandler(ButtonHandlerChanged);
+    //buttonA.setPressedHandler(pressed);
+    //buttonA.setReleasedHandler(released);
+
+    // captures any type of click, longpress or shortpress
+    buttonA.setTapHandler(ButtonHandlerTap);
+    //buttonA.setClickHandler(click);
+    //buttonA.setLongClickHandler(longClick);
+    //buttonA.setDoubleClickHandler(doubleClick);
+    //buttonA.setTripleClickHandler(tripleClick);
+
 #endif    
 
     Serial.begin(SERIAL_SPEED);             // initialize serial
@@ -1762,25 +2171,53 @@ void setup() {
     lastMillis = millis();
     initialize();     
     CmdHello();                             // started message to serial
-#ifdef WifiSupport
-    connectWiFi();
+#if defined(WifiSupport)
+    initWifi();
+
+    ArduinoOTA
+    .onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH)
+            type = "sketch";
+        else // U_SPIFFS
+            type = "filesystem";
+        // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+        Serial.println("Start updating " + type);
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nEnd");
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+    ArduinoOTA.begin();
 #endif
 }
 
 
 /*   Main Loop  */
 void loop() {
-    handleTime();                           // check if millis() wrapped (for reporting)
-    if (Serial.available()) 
-        handleInput(Serial.read());         // input over serial 
-#ifdef WifiSupport    
-    handleConnections();                    // new TCP connection or input over TCP
+#if defined(WifiSupport)
+#if !defined(STATIC_WIFI)
+    wifiManager.process();                          // process config portal
 #endif
-    readAnalog();                           // analog measurements
-#ifdef debugPins
-    if (devVerbose >= 10)
-        debugPinChanges();
+    ArduinoOTA.handle();
+    handleConnections();                            // new TCP connection or input over TCP
 #endif
-    if (reportDue())
-        report();                           // report counts
+#if defined (TFT_DISPLAY)
+    buttonA.loop();                                 // check for button events
+#endif
+    handleTime();                                   // check if millis() wrapped (for reporting)
+    if (Serial.available()) handleInput(Serial.read()); // input over serial 
+    readAnalog();                                   // analog measurements
+    if (enablePinDebug) debugDigitalPinChanges();
+    report();                                       // report counts if due
 }
