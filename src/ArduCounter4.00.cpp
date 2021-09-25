@@ -582,7 +582,9 @@ void printVersionMsg() {
 #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
 #if defined (ARDUINO_AVR_NANO)
     Output->print(F("NANO"));
-#else 
+#elif defined (ARDUINO_AVR_PRO)
+    Output->print(F("PRO"));
+#else
     Output->print(F("UNO"));
 #endif
 #elif defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega16U4__)
