@@ -168,8 +168,7 @@ const char versionStr[] PROGMEM = "ArduCounter V4.26";
 // show cmd also takes > 10 ms 
 // serial output of hello msg takes long because the serial buffer is too small so Serial.print takes longer ...
 
-//#define SERIAL_SPEED 38400
-#define SERIAL_SPEED 115200
+//#define SERIAL_SPEED 115200   // went to platformio.ini to be device dependant
 #define MAX_INPUT_NUM 16
 
 #define pin2GPIO(P) ( pgm_read_byte( digital_pin_to_gpio_PGM + (P) ) )
