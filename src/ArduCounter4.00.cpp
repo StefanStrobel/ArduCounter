@@ -1662,6 +1662,25 @@ void CmdKeepAlive() {
     }
 }
 
+
+bool checkKeepAlive() {        
+    now = millis();                                         
+    if((now - lastKeepAlive) > (keepAliveTimeout*3000)) {   // check keepAlive timout (* 3 secs)
+        Serial.println(F("D no keepalive - close"));
+        Output->println(F("D no keepalive - close"));   
+        //Output->print(F("D timeout was "));
+        //Output->print(keepAliveTimeout);
+        //Output->print(F(" last at "));
+        //Output->print(lastKeepAlive);
+        //Output->print(F(" now "));
+        //Output->print(now);
+        Output->println();
+        Client1.stop();                                     // close connection due to keepalive timeout 
+        return false;
+    }
+    return true;
+}
+
  
 void CmdQuit() {
 #if defined(WifiSupport)
@@ -1870,14 +1889,14 @@ void handleConnections() {
     } 
     if (WiFi.status() != WL_CONNECTED) {                        // WiFi lost
         if (serverStarted) {                                    // first time we notice ...
-            printWifiState (&Serial);                          // show that we lost Wifi
+            printWifiState (&Serial);                           // show that we lost Wifi
             Server.close();                                     // Stop  the TCP server
             serverStarted = false;                              // so printWifiState will be called after reconnect
             Serial.println(F("D Wifi lost - TCP Server stopped"));
             lastReconnectTry = now;                             // don't try to manually reconnect right now - Framework should do it
         }
         if ((now - lastReconnectTry) > 5000) {
-            printWifiState (&Serial);                          // show that we lost Wifi
+            printWifiState (&Serial);                           // show that we lost Wifi
             Serial.println(F("D Try reconnecting WiFi"));
             WiFi.begin();                                       // try to force reconnect (framework seems to not do it sometimes...)
             lastReconnectTry = now;
@@ -1890,20 +1909,9 @@ void handleConnections() {
             handleInput(Client1.read());                        // input from TCP
             //Serial.println(F("D new Input over TCP"));
         }
-        now = millis();                                         // get millis again to avoid keepalive timeout directly after first k command
-        if((now - lastKeepAlive) > (keepAliveTimeout*3000)) {   // check keepAlive timout (* 3 secs)
-            Serial.println(F("D no keepalive - close"));
-            Output->println(F("D no keepalive - close"));   
-            //Output->print(F("D timeout was "));
-            //Output->print(keepAliveTimeout);
-            //Output->print(F(" last at "));
-            //Output->print(lastKeepAlive);
-            //Output->print(F(" now "));
-            //Output->print(now);
-            Output->println();
-            Client1.stop();                                     // close connection due to keepalive timeout 
-        }
-        Client2 = Server.available();                           // refuse further connect attempts
+        if (!checkKeepAlive())                                  // no keepalive within timeout? -> close and return 
+            return;
+        Client2 = Server.available();                           // refuse further connect attempts by accepting and closing after a message
         if (Client2) {
             remote = Client2.remoteIP();
             Client2.println(F("conn busy"));
@@ -1913,7 +1921,8 @@ void handleConnections() {
                 Serial.println(F(" rejected"));
             }
         }
-    } else {    // no client connected right now
+    } 
+    else {    // no client connected right now
         if (TCPconnected) {                                 // client used to be connected, now disconnected
             TCPconnected = false;
             Output = &Serial;
