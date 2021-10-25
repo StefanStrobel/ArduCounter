@@ -158,15 +158,7 @@ uint8_t displayMode = 1;
 #include "pins_arduino.h"
 #include <EEPROM.h>
 
-const char versionStr[] PROGMEM = "ArduCounter V4.26";
-
-// even with 38400 one report takes less than 1ms. However printing the report on the tft takes 2ms!
-// but if analog interval is set to 10 or less and we output a lot to serial (devVerbose 50) then 
-//     background tasks (serial?) eat up 5ms per round...
-//     this is much better at 115200! (obviously serial io is done interrupt driven at same core)
-// TCP io also creates delays of 15-20ms between loop calls
-// show cmd also takes > 10 ms 
-// serial output of hello msg takes long because the serial buffer is too small so Serial.print takes longer ...
+const char versionStr[] PROGMEM = "ArduCounter V4.27";
 
 //#define SERIAL_SPEED 115200   // went to platformio.ini to be device dependant
 #define MAX_INPUT_NUM 16
@@ -531,8 +523,8 @@ uint8_t findOutPin (uint8_t oPin) {
 
 // check if pin is allowed
 bool checkPin (uint8_t aPin) {
-    if (aPin >= MAX_APIN) return false;                     // pin number too big
-    if (pin2GPIO(aPin) == FF) return false;      // pin is not allowed at all
+    if (aPin >= MAX_APIN) return false;         // pin number too big
+    if (pin2GPIO(aPin) == FF) return false;     // pin is not allowed at all
     return true;
 }
 
@@ -852,7 +844,7 @@ void printVerboseFlags() {
     Output->print(F(",")); Output->print(enableDevTime);
     Output->println();
 }
-    
+
 
 #ifdef TFT_DISPLAY
 void printUnitConfig() {
@@ -1074,13 +1066,26 @@ void printPinCounter(pinData_t *pd, boolean showOnly, uint32_t now) {
 #if defined(WifiSupport)
 // called from show and new connectinn
 void printWifiState(Print *Out) {
-    if (WiFi.status() == WL_CONNECTED) {
-        Out->print(F("D Connected to "));   Out->print(WiFi.SSID());    
-        Out->print(F(" with IP "));         Out->print(WiFi.localIP());    
-        Out->print(F(" RSSI "));            Out->print(WiFi.RSSI());
-        Out->println();
-    } else {
-        Out->println(F("D Wifi not connected"));
+    switch (WiFi.status()) {
+        case WL_CONNECT_FAILED: 
+            Out->println(F("D Wifi Connect Failed")); 
+            break;
+        case WL_CONNECTION_LOST: 
+            Out->println(F("D Wifi Connection Lost")); 
+            break;
+        case WL_DISCONNECTED: 
+            Out->println(F("D Wifi Disconnected")); 
+            break;
+        case WL_CONNECTED: 
+            Out->print(F("D Wifi Connected to ")); Out->print(WiFi.SSID());    
+            Out->print(F(" with IP "));            Out->print(WiFi.localIP());    
+            Out->print(F(" RSSI "));               Out->print(WiFi.RSSI());
+            Out->println();
+            break;
+        default:
+            Out->print(F("D Wifi status ")); 
+            Out->println(WiFi.status());
+            break;
     }
 #if defined(TFT_DISPLAY)
     if (displayMode > 0) {
@@ -1773,23 +1778,6 @@ void debugDigitalPinChanges() {
 
 
 #if defined(WifiSupport)   
-void printWifiStatus() {
-    Serial.print(F("D Wifi Status is "));
-    switch (WiFi.status()) {
-        case WL_CONNECT_FAILED: 
-        Serial.println(F("Connect Failed")); break;
-        case WL_CONNECTION_LOST: 
-        Serial.println(F("Connection Lost")); break;
-        case WL_DISCONNECTED: 
-        Serial.println(F("Disconnected")); break;
-        case WL_CONNECTED: 
-        Serial.println(F("Connected")); break;
-        default:
-        Serial.println(WiFi.status());
-    }
-}
-
-
 #if !defined(STATIC_WIFI)
 void configModeCallback (WiFiManager *myWiFiManager) {
     Serial.println("Entered config mode");
@@ -1830,7 +1818,7 @@ void initWifi() {
         Serial.print(F("D Connecting WiFi to ")); Serial.println(ssid);
         WiFi.begin(ssid, password);                 // connect with compiled strings
         while (WiFi.status() != WL_CONNECTED) {
-            printWifiStatus();
+            printWifiState(&Serial);
             delay(1000);
             counter++;
             if (counter > 2) {
@@ -1852,7 +1840,7 @@ void initWifi() {
         Serial.println(F("D Try reconnecting WiFi"));
         WiFi.begin();             
         delay(1000);
-        printWifiStatus();
+        printWifiState(&Serial);
         if (WiFi.status() != WL_CONNECTED) {
 #if defined(TFT_DISPLAY)    
             tft.setCursor(0,0);
