@@ -1664,7 +1664,7 @@ void CmdKeepAlive() {
 
 
 bool checkKeepAlive() {        
-    now = millis();                                         
+    uint32_t now = millis();                                         
     if((now - lastKeepAlive) > (keepAliveTimeout*3000)) {   // check keepAlive timout (* 3 secs)
         Serial.println(F("D no keepalive - close"));
         Output->println(F("D no keepalive - close"));   
