@@ -158,7 +158,7 @@ uint8_t displayMode = 1;
 #include "pins_arduino.h"
 #include <EEPROM.h>
 
-const char versionStr[] PROGMEM = "ArduCounter V4.27";
+const char versionStr[] PROGMEM = "ArduCounter V4.28";
 
 //#define SERIAL_SPEED 115200   // went to platformio.ini to be device dependant
 #define MAX_INPUT_NUM 16
@@ -184,7 +184,8 @@ const char versionStr[] PROGMEM = "ArduCounter V4.27";
 WiFiManager wifiManager;
 #endif
 
-WiFiServer Server(80);              // For ESP WiFi connection
+const char *hostname = "Mower";
+WiFiServer Server(23);              // For ESP WiFi connection
 WiFiClient Client1;                 // active TCP connection
 WiFiClient Client2;                 // secound TCP connection to send reject message
 boolean serverStarted;              // to show the status once
@@ -1869,7 +1870,9 @@ void initWifi() {
             WiFi.begin();         
             delay (1000);
         }            
+        wifiManager.setHostname(hostname);                              // set the hostname
         wifiManager.setConfigPortalBlocking(false);
+        wifiManager.setConfigPortalTimeout(300);                        // disable after 5 minutes
         wifiManager.setAPCallback(configModeCallback);  //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
         wifiManager.autoConnect();
 #endif
