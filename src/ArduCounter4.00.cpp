@@ -44,6 +44,26 @@
 
 */
 
+/*
+    Commands:
+ 'a': add a pin
+ 'c': clear a counter for pin specifid
+ 'd': delete a pin
+ 'e': save to EEPROM
+ 'h': hello
+ 'i': interval
+ 'k': keep alive
+ 'l': led feedback
+ 'q': quit
+ 'r': reset / restart
+ 's': show
+ 't': thresholds for analog pins (legacy - moved to a)
+ 'u': pulses per unit for local output
+ 'v': dev verbose
+ 'w': reset wifi settings
+
+*/
+
 /* test cmds 
 
     Nano analog
@@ -105,6 +125,42 @@
     Analog 36 without LED:
     36,3,0,0,0,800,1200a
     36,3,0,0,0,1300,1400a
+
+    short Intervals for just counting live
+    1,2,1,1,1,2i
+
+    1,1,1,2,0v
+
+    Ausgabe R:
+        PinNr C Count D CountDiff / TimeDiff T DeltaT S Sequenz
+
+    Ausgabe History: 
+        H PortNr Seq, TimeBack:Len @ LastLev/lastAnalogLevel*SampleCount Action (C/G bzw. X/R/P wenn nur Spike oder zu kurz)
+
+    Connect:
+        pio device monitor -p socket://192.168.11.160:23 
+
+    Pin definition command:
+        e.g. 36,2,1,50,12,10,100
+        pinNr, falling=2/rising=3, [Pullup, minLen, analogOut, analogThresholdMin, analogThresholdMax]
+
+
+    Output for s - show
+        Firmare
+        Network
+        Intervals: Min,Max,Small,CountMin,AnalogInterval,AnalogSamples
+        Verbose: EnaHistory,EnaSerialEcho,EnaPinDebug,EnaAnalogDebug,EnaDevTime
+                PinDebug=erläutere jeden LevelChange eines Pins 
+                AnalogDebug: Mesurements
+                History: gebündelter Verlauf
+        Units: Pin,PPU,PPUDiv,Unit,FlowUnitFactor,FlowUnit
+        Pin Counter:    
+            P Number Rise/Fall Pullup MMinWidth Analog: out outPin Thresholds min/max
+
+    Analog values are between 0 and 4096
+
+    Analog 36 without LED:
+    36,3,0,0,0,800,1200a
 
     short Intervals for just counting live
     1,2,1,1,1,2i
@@ -2075,6 +2131,14 @@ void readAnalog() {
     analogCallLast = now;
 
     if ((now - analogReadLast) > analogReadInterval) {      // time for next analog read?
+
+        for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {     // for all analog pins
+            analogData_t *ad = &analogData[aIdx];
+            if (ad->outPinName) {
+                useLED = 1;
+            }
+        }
+
 
         for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {     // for all analog pins
             analogData_t *ad = &analogData[aIdx];
