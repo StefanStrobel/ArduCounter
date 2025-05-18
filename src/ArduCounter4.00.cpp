@@ -24,6 +24,26 @@
  * A0-A5 (D14-D19) = PCINT 8-13 =  PCIR1 = PC = PCIE1 = pcmsk1
  */
 
+/*
+    Commands:
+ 'a': add a pin
+ 'c': clear a counter for pin specifid
+ 'd': delete a pin
+ 'e': save to EEPROM
+ 'h': hello
+ 'i': interval
+ 'k': keep alive
+ 'l': led feedback
+ 'q': quit
+ 'r': reset / restart
+ 's': show
+ 't': thresholds for analog pins (legacy - moved to a)
+ 'u': pulses per unit for local output
+ 'v': dev verbose
+ 'w': reset wifi settings
+
+*/
+
 /* test cmds 
 
     Nano analog
@@ -59,6 +79,42 @@
     flash OTA: 
     e.g. espota.py -i192.168.x,y -p 3232 -f ./FHEM/firmware/ArduCounter-ESP32T.bin
     if needed download espota from https://github.com/esp8266/Arduino/blob/master/tools/espota.py
+
+    Connect:
+        pio device monitor -p socket://192.168.11.160:23 
+
+    Pin definition command:
+        e.g. 36,2,1,50,12,10,100
+        pinNr, falling=2/rising=3, [Pullup, minLen, analogOut, analogThresholdMin, analogThresholdMax]
+
+
+    Output for s - show
+        Firmare
+        Network
+        Intervals: Min,Max,Small,CountMin,AnalogInterval,AnalogSamples
+        Verbose: EnaHistory,EnaSerialEcho,EnaPinDebug,EnaAnalogDebug,EnaDevTime
+                PinDebug=erläutere jeden LevelChange eines Pins 
+                AnalogDebug: Mesurements
+                History: gebündelter Verlauf
+        Units: Pin,PPU,PPUDiv,Unit,FlowUnitFactor,FlowUnit
+        Pin Counter:    
+            P Number Rise/Fall Pullup MMinWidth Analog: out outPin Thresholds min/max
+
+    Analog values are between 0 and 4096
+
+    Analog 36 without LED:
+    36,3,0,0,0,800,1200a
+
+    short Intervals for just counting live
+    1,2,1,1,1,2i
+
+    1,1,1,2,0v
+
+    Ausgabe R:
+        PinNr C Count D CountDiff / TimeDiff T DeltaT S Sequenz
+
+    Ausgabe History: 
+        H PortNr Seq, TimeBack:Len @ LastLev/lastAnalogLevel*SampleCount Action (C/G bzw. X/R/P wenn nur Spike oder zu kurz)
 */
 
 /*
@@ -150,6 +206,10 @@ TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h or a
 uint8_t lineCount;          // initialized in each report call
 
 #define TFT_BUTTON 0
+#if !defined(TFT_ANALOG_AMP)
+#define TFT_ANALOG_AMP 3
+#endif
+
 #define displayModeMax 3
 Button2 buttonA = Button2(TFT_BUTTON);
 uint8_t displayMode = 1;
@@ -184,7 +244,7 @@ const char versionStr[] PROGMEM = "ArduCounter V4.28";
 WiFiManager wifiManager;
 #endif
 
-const char *hostname = "Mower";
+const char *hostname = "ArduCounter";
 WiFiServer Server(23);              // For ESP WiFi connection
 WiFiClient Client1;                 // active TCP connection
 WiFiClient Client2;                 // secound TCP connection to send reject message
@@ -364,7 +424,7 @@ uint8_t maxPinIndex = 0;                        // the next available index (= n
 typedef struct analogData {
     pinData_t *inPinData;                       // pointer to pinData structure for input pin (to call doCount)
     uint8_t inPinName;                          // printed pin Number for user input / output (optinal here?)
-    uint8_t outPinName;                         // printed pin number to use for ir (convert using our macro)
+    uint8_t outPinName;                         // printed pin number to use for ir out for differential analog reading (convert using our macro)
     uint16_t thresholdMin;                      // measurement for 0 level
     uint16_t thresholdMax;                      // measurement for 1 
     uint8_t triggerState;                       // which level was it so far
@@ -372,6 +432,7 @@ typedef struct analogData {
     uint16_t sumOn  = 0;                        // sum of measured values during light on
     uint16_t avgCnt = 0;                        // counter for average during one level
     uint32_t avgSum = 0;                        // sum for average during one level
+    uint32_t samples = 0;                       // number of samples taken
 } analogData_t;
 
 #define MAX_ANALOG 2
@@ -385,6 +446,7 @@ typedef struct histData {
     volatile uint16_t aLvl;                     // average analog level for this entry
     volatile uint32_t time;                     // time for this entry
     volatile uint32_t len;                      // time that this level was held
+    volatile uint32_t samples;                  // number of analog samples taken
     volatile char act;                          // action (count, reject, ...) as one char
 } histData_t;
 
@@ -404,7 +466,7 @@ uint32_t analogReadLast;            // millis() at last analog read
 uint32_t analogReadWait;            // millis() during state machine 
 uint16_t analogReadInterval = 50;   // interval at which to read analog values (miliseconds)
 uint8_t analogReadState = 0;        // to keep track of switching LED on/off, measuring etc.
-uint8_t analogReadAmp = 3;          // amplification for display
+uint8_t analogReadAmp = TFT_ANALOG_AMP; // amplification for display
 uint8_t analogReadSamples = 4;      // samples to take with the light off - max 16 so sum can be an int 16
 uint8_t analogReadCount = 0;        // counter for sampling
 
@@ -651,7 +713,7 @@ bool checkVal(uint8_t index, uint16_t min, uint16_t max = 0, bool doErr = true) 
    intervalEnd[] is set here and in report
    intervalStart[] is set in case a pin was not initialized yet and in report
 */
-static void doCount(pinData_t *pd, uint8_t level, uint16_t analogLevel=0) {
+static void doCount(pinData_t *pd, uint8_t level, uint16_t analogLevel=0, uint32_t samples=0) {
     uint32_t now = millis();
     uint32_t len = now - pd->lastChange;
     char act = ' ';
@@ -663,10 +725,10 @@ static void doCount(pinData_t *pd, uint8_t level, uint16_t analogLevel=0) {
             act = 'X';                                  // -> reject gap / set action to X (gap too short)
         }
     } else {    // len is big enough
-        if (pd->lastLevel != pd->pulseLevel) {          // edge fits pulse start, level is pulse, before was gap
+        if (pd->lastLevel != pd->pulseLevel) {          // edge fits pulse start, level is pulse, before was gap (pulseLevel = 1 for rising)
             act = 'G';                                  // -> gap (even if betw. was a spike that we ignored)
         } else {                                        // edge is a change to gap, level is now gap
-            if (pd->lastLongLevel != pd->pulseLevel) {  // last valid level was gap, now pulse 
+            if (pd->lastLongLevel != pd->pulseLevel) {  // last valid level was gap, now pulse (e.g. changed from 0 to 1 and set to rising)
                 act = 'C';                              // -> count
                 pd->counter++;                          
                 pd->intervalEnd = now;                  // remember time in case pulse is last in the interval
@@ -694,6 +756,7 @@ static void doCount(pinData_t *pd, uint8_t level, uint16_t analogLevel=0) {
         hd->aLvl  = analogLevel;
         hd->len   = len;
         hd->act   = act;
+        hd->samples = samples;
     }
     pd->lastChange = now;
     pd->lastLevel  = level;
@@ -943,6 +1006,7 @@ void printPinHistory(pinData_t *pd, uint32_t now) {
             Output->print (F("@"));  Output->print (hd->level);             // level (0/1)
             if (pd->analogFlag) {
                 Output->print (F("/"));  Output->print (hd->aLvl);          // analog level
+                Output->print (F("*"));  Output->print (hd->samples);       // analog samples
             }
             Output->print (hd->act);                                        // action
             histLastOut = hd->seq;
@@ -1334,12 +1398,12 @@ void CmdInterval() {
     if (!checkVal(2,0,3600)) return;                    // index 2 is interval small, max 3600 (1h)
     if (!checkVal(3,0,100))  return;                    // index 3 is count min, max 100
 
-    intervalMin = commandData[0] * 1000;      // convert to miliseconds
+    intervalMin = commandData[0] * 1000;  // convert to miliseconds
     intervalMax = commandData[1] * 1000;
     intervalSml = commandData[2] * 1000;
     countMin    = commandData[3];
         
-    if (checkVal(4,0,10000,false)) {                          // index 4 is optional analog read interval
+    if (checkVal(4,0,10000,false)) {                    // index 4 is optional analog read interval
         analogReadInterval = (int)commandData[4];
     }
     if (checkVal(5,1,100,false)) {                      // index 5 is optional analog read samples
@@ -1351,8 +1415,8 @@ void CmdInterval() {
 
 // for backward compatibility - set thresholds for all analog pins at the same time
 void CmdThreshold() {    
-    if (!checkVal(0,1,1023)) return;                            // analog threshold min, min 1, max 1023
-    if (!checkVal(1,1,1023)) return;                            // analog threshold max, min 1, max 1023
+    if (!checkVal(0,1,4000)) return;                            // analog threshold min, min 1, max 4000
+    if (!checkVal(1,1,4000)) return;                            // analog threshold max, min 1, max 4000
     for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++)
         analogData[aIdx].thresholdMin = commandData[0]; 
     for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++)
@@ -1365,6 +1429,8 @@ void CmdThreshold() {
 
 /*
     handle add command.
+    e.g. 36,2,1,50,12,10,100
+    pinNr, falling=2/rising=3, Pullup, minLen, analogOut, analogThreshold min, analogThreshold max
 */
 void CmdAdd () {
     uint8_t aPin = commandData[0];              // commandData[0] is pin number
@@ -1391,17 +1457,19 @@ void CmdAdd () {
         pd->pullupFlag = commandData[2];        // as defined
     else pd->pullupFlag = 0;                    // default to no pullup
 
-    if (!checkVal(3,1,1000, false)) 
+    if (!checkVal(3,0,1000, false)) 
         commandData[3] = 2;                     // value 3 is min length, optional. Assume default 2 if invalid
     pd->pulseWidthMin = commandData[3];
     
-    if (checkVal(4,1,MAX_APIN, false)) {        // 4 - analog out pin number given
-        uint8_t oPin = commandData[4];
-        if (!checkPin(oPin) || (ledOutPin && oPin == ledOutPin) || findInPin(oPin) != FF)  {          
-            PrintPinErrorMsg(oPin);             // pin alreday used as input or ledout (analog out would be ok)
-            return;
+    if (checkVal(4,0,MAX_APIN, false)) {        // 4 - analog out pin number given (0=none)
+        uint8_t oPin = commandData[4];          // 0 should mean no analog out, just in
+        if (oPin) {
+            if (!checkPin(oPin) || (ledOutPin && oPin == ledOutPin) || findInPin(oPin) != FF)  {          
+                PrintPinErrorMsg(oPin);         // pin alreday used as input or ledout (analog out would be ok)
+                return;
+            }
         }
-        uint8_t analogIndex = findAnalogData(pd);           // reuse or create analog entry for aPin with oPin
+        uint8_t analogIndex = findAnalogData(pd);           // reuse or create analog entry for aPin
         if (analogIndex == FF) {
             if (maxAnalogIndex < MAX_ANALOG) {
                 analogIndex = maxAnalogIndex++;             // new entry -> initialize, inc used analog pins 
@@ -1420,11 +1488,13 @@ void CmdAdd () {
         ad->inPinName = aPin;
         ad->outPinName = oPin;
         pinMode (rPin, INPUT);
-        pinMode (pin2GPIO(oPin), OUTPUT);
+        if (oPin) {
+            pinMode (pin2GPIO(oPin), OUTPUT);
+        }
         
-        if (checkVal(5,1,1023))                             // analog threshold min, min 1, max 1023
+        if (checkVal(5,1,4000))                             // analog threshold min, min 1, max 4000
             ad->thresholdMin = commandData[5];
-        if (checkVal(6,1,1023))                             // analog threshold max, min 1, max 1023
+        if (checkVal(6,1,4000))                             // analog threshold max, min 1, max 4000
             ad->thresholdMax = commandData[6];
     } else {
         if (pd->pullupFlag) pinMode (rPin, INPUT_PULLUP);
@@ -1709,7 +1779,9 @@ void CmdRestart() {
 
 void CmdWifiReset() {
 #if defined(WifiSupport)
+#if !defined(STATIC_WIFI)
     wifiManager.resetSettings();
+#endif
 #endif
 }
 
@@ -1977,9 +2049,10 @@ void detectTrigger(analogData_t *ad, unsigned int val) {
     if (nextState != ad->triggerState) {            // if level has changed
         average = ad->avgSum / ad->avgCnt;
         if (average > 4000) average = 4000;
-        doCount (ad->inPinData, nextState, (uint16_t) average);
-        ad->avgSum = 0;
-        ad->avgCnt = 0;
+        doCount (ad->inPinData, nextState, val, ad->samples);
+        ad->avgSum  = 0;
+        ad->avgCnt  = 0;
+        ad->samples = 0;
         if (enablePinDebug)
             printPinChangeDebug(ad->inPinData, nextState);
     }
@@ -1989,9 +2062,10 @@ void detectTrigger(analogData_t *ad, unsigned int val) {
 
 void readAnalog() {
     uint32_t now = millis();
-    char line[26];
+    char line[40];
     uint16_t waitForOff = 0; 
-    uint16_t waitForOn = 1;
+    uint16_t waitForOn  = 1;        // wait 1 ms between reading analog values with LED off and values with LED on
+    uint8_t useLED = 0;
 
     //if (analogCallLast && (now - analogCallLast) > 5) {
     //    Output->print(F("D readAnalog call delay "));
@@ -2000,16 +2074,32 @@ void readAnalog() {
     analogCallLast = now;
 
     if ((now - analogReadLast) > analogReadInterval) {      // time for next analog read?
+
+        for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {     // for all analog pins
+            analogData_t *ad = &analogData[aIdx];
+            if (ad->outPinName) {
+                useLED = 1;
+            }
+        }
+
         switch (analogReadState) {
-            case 0:                                                 // initial state
-                for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {                    
+            case 0:                                                 // initial state                
+                for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {     // for all analog pins
                     analogData_t *ad = &analogData[aIdx];
-                    digitalWrite(pin2GPIO(ad->outPinName) , LOW);   // make sure IR LED is off for first read
-                    analogReadCount = 0;                            // initialize sums and counter
+                    if (ad->outPinName) {
+                        digitalWrite(pin2GPIO(ad->outPinName) , LOW);       // make sure IR LED is off for first read
+                    }
+                    analogReadCount = 0;                                    // initialize sums and counter
                     ad->sumOff = 0; ad->sumOn = 0;
+                    ad->samples++;
                 }
-                analogReadState = 1;
-                analogReadWait = millis();
+                if (!useLED && analogReadState < 5) {
+                    analogReadState = 5;                                    // skip everything before the last measurements
+                } else {
+                    analogReadState = 1;
+                    analogReadWait = millis();
+
+                }
                 break;
             case 1:                                                 // wait before measuring
                 if ((now - analogReadWait) < waitForOff)            // todo: wait in microseconds with micros() function, make witForOff configurable
@@ -2017,10 +2107,10 @@ void readAnalog() {
                 analogReadState = 2;
                 break;
             case 2:
-                for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {
+                for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {     // for all analog inputs
                     analogData_t *ad = &analogData[aIdx];
-                    uint16_t sample = analogRead(pin2GPIO(ad->inPinName));   // read the analog in value (off)
-                    ad->sumOff += sample;
+                    uint16_t sample = analogRead(pin2GPIO(ad->inPinName));  // read the analog in value (off)
+                    ad->sumOff += sample;                                   // and add value to sumOff (LED off)
 
                     if (enableAnalogDebug > 2) {
                         Output->print(F("M "));
@@ -2032,11 +2122,13 @@ void readAnalog() {
                         Output->println();
                     }
                 }
-                if (++analogReadCount < analogReadSamples)
-                    break;
-                for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {
+                if (++analogReadCount < analogReadSamples)                  // increment read count and stay in this state until all samples read
+                    break;                  
+                for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {     // when all samples are read turn all IR LEDs on for next state
                     analogData_t *ad = &analogData[aIdx];
-                    digitalWrite(pin2GPIO(ad->outPinName), HIGH);      // turn IR LED on
+                    if (ad->outPinName) {
+                        digitalWrite(pin2GPIO(ad->outPinName), HIGH);      
+                    }
                 }
                 analogReadCount = 0;
                 analogReadState = 4;
@@ -2051,8 +2143,9 @@ void readAnalog() {
                 int sensorDiff;
                 for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {
                     analogData_t *ad = &analogData[aIdx];
-                    uint16_t sample = analogRead(pin2GPIO(ad->inPinName));   // read the analog in value (on)
-                    ad->sumOn += sample;
+                    uint16_t sample = analogRead(pin2GPIO(ad->inPinName));  // read all analog in values (on)
+                    ad->sumOn += sample;                                    // and add to sum for LED off
+                    ad->samples++;
                     if (enableAnalogDebug > 2) {
                         Output->print(F("M "));
                         Output->print(millis());
@@ -2064,19 +2157,28 @@ void readAnalog() {
                     }
 
                 }
-                if (++analogReadCount < analogReadSamples) 
+                if (++analogReadCount < analogReadSamples)              // stay in this state until all samples are read
                     break;
+
                 for (uint8_t aIdx = 0; aIdx < maxAnalogIndex; aIdx++) {
                     analogData_t *ad = &analogData[aIdx];
-                    digitalWrite(pin2GPIO(ad->outPinName) , LOW);       // turn IR LED off again
+                    if (ad->outPinName) {
+                        digitalWrite(pin2GPIO(ad->outPinName) , LOW);   // turn IR LED off again
+                        sensorDiff = (ad->sumOn / analogReadSamples) - (ad->sumOff / analogReadSamples);
+                    } else {
+                        if (!useLED) {
+                            sensorDiff = ad->sumOn / analogReadSamples;    // without LEDs just take the average of "on" measurements
+                        } else {
+                            sensorDiff = (ad->sumOff + ad->sumOn) / (analogReadSamples * 2);    // without ths one LED take the average
+                        }
+                    }
                 
-                    sensorDiff = (ad->sumOn / analogReadSamples) - (ad->sumOff / analogReadSamples);
                     if (sensorDiff < 0) sensorDiff = 0;
                     if (sensorDiff > 4096) sensorDiff = 4096;
                     detectTrigger (ad, sensorDiff);                    // calculate level with triggers
                     if (enableAnalogDebug > 1) {
-                        sprintf(line, "L%2d: %4d, %4d -> % 4d", ad->inPinName, 
-                            ad->sumOn / analogReadSamples, ad->sumOff / analogReadSamples, sensorDiff);
+                        sprintf(line, "L%2d: %4d, %4d -> %4d %4d", ad->inPinName, 
+                            ad->sumOn / analogReadSamples, ad->sumOff / analogReadSamples, sensorDiff, now-analogReadLast);
                         Output->println(line);
                     } else if (enableAnalogDebug) {
                         sprintf(line, "L%2d: % 4d", ad->inPinName, sensorDiff);
@@ -2108,6 +2210,15 @@ void ButtonHandlerChanged(Button2& btn) {
 }
 */
 
+
+#if defined (BUTTON_RESET)
+void ButtonHandlerDouble(Button2& btn) {
+    uint32_t now = millis();
+    for (uint8_t pinIndex=0; pinIndex < MAX_PIN; pinIndex++)
+        initPinVars(&pinData[pinIndex], now);                   
+}
+
+#endif
 
 void ButtonHandlerTap(Button2& btn) {
     displayMode++;
@@ -2159,7 +2270,9 @@ void setup() {
     buttonA.setTapHandler(ButtonHandlerTap);
     //buttonA.setClickHandler(click);
     //buttonA.setLongClickHandler(longClick);
-    //buttonA.setDoubleClickHandler(doubleClick);
+#if defined (BUTTON_RESET)    
+    buttonA.setDoubleClickHandler(ButtonHandlerDouble);
+#endif
     //buttonA.setTripleClickHandler(tripleClick);
 
 #endif    
